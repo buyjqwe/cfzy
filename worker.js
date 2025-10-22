@@ -334,7 +334,7 @@ const html =
 '    <div class="container mx-auto p-4 sm:p-6 lg:p-8">' +
 '        <header class="text-center mb-8">' +
 '            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 智能作业分析器</h1>' +
-'            <p class="mt-2 text-lg text-gray-600">由 OneDrive & Gemini 强力驱动 (无大小限制)</p>' +
+'            <p class="mt-2 text-lg text-gray-600">2510222131</p>' +
 '        </header>' +
 '        <form id="upload-form" class="bg-white p-6 rounded-lg shadow-md border border-gray-200">' +
 '            <div class="mb-5">' +
