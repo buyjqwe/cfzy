@@ -1,0 +1,11 @@
+name = "gemini-onedrive-analyzer"
+main = "worker.js"
+compatibility_date = "2023-11-21"
+
+[vars]
+# Note: It's more secure to set secrets using the command line or GitHub Actions secrets:
+# wrangler secret put GOOGLE_API_KEY
+# wrangler secret put MS_TENANT_ID
+# wrangler secret put MS_CLIENT_ID
+# wrangler secret put MS_CLIENT_SECRET
+# wrangler secret put MS_USER_ID
