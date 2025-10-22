@@ -15,6 +15,8 @@ const fflate = {
         for (; ; --a) {
             if (a < 0 || (l[a] === 0x50 && l[a + 1] === 0x4B && l[a + 2] === 0x05 && l[a + 3] === 0x06)) break;
         }
+        if (a < 0) throw new Error("Invalid ZIP file: could not find end of central directory record");
+        
         const f = l[a + 10] | l[a + 11] << 8;
         let g = l[a + 16] | l[a + 17] << 8 | (l[a + 18] | l[a + 19] << 8) << 16;
         const h = {};
@@ -36,14 +38,77 @@ const fflate = {
                     const x = new Uint8Array(n);
                     inflateSync(w, x);
                     h[v] = x;
-                } else throw `unknown compression type ${k}`;
+                } else throw new Error(`Unknown compression type ${k}`);
             }
         }
         return h;
     }
 };
-const inflateSync = (c, o) => { const n = c.length; let i = 0, s = 0; const a = o || new Uint8Array(n * 3); for (;;) { const h = c[i++]; if (i > n) throw "Unexpected EOF"; const m = h & 7, y = h >> 3; if (m === 1) { let e = new Uint8Array(g()); i += 4, e.set(c.subarray(i, i += g())); if (s + e.length > a.length) { const t = new Uint8Array(s + e.length); t.set(a.subarray(0, s)), t.set(e, s), a = t; } else a.set(e, s); s += e.length; } else if (m === 2) { const [e, t] = (()=>{const e=new Uint16Array(32),t=new Uint16Array(32);for(let n=0;n<32;n++)e[n]=g();for(let n=0;n<32;n++)t[n]=g();return[e,t]})(); for (;;) { const n = e[c[i++]]; if (n < 256) a[s++] = n; else if (n > 256) { let r = n - 257; const l = dt[r]; let p = g(); i += l, p &= (1 << l) - 1; const f = c[i++]; let u = bt[f], v = g(); i += u, v &= (1 << u) - 1; for (let z = 0; z < p + 3; ++z) a[s + z] = a[s + z - (v + 1)]; s += p + 3; } else break; if (s > a.length - 258) { const newBuf = new Uint8Array(a.length + 32768); newBuf.set(a); a = newBuf; } } } else if (m) { throw `Invalid block type ${m}`; } if (y) break; } return a.subarray(0, s); };
-const g=()=>{const e=c[i++],t=c[i++];return e|t<<8};
+const inflateSync = (c, o) => { 
+    const n = c.length; 
+    let i = 0, s = 0; 
+    const a = o || new Uint8Array(n * 3); 
+    for (;;) { 
+        if (i >= n) throw new Error("Unexpected EOF in inflate");
+        const h = c[i++]; 
+        const m = h & 7, y = h >> 3; 
+        if (m === 1) { 
+            let e = new Uint8Array(g()); 
+            i += 4; 
+            if (i + e.length > c.length) throw new Error("Invalid stored block length");
+            e.set(c.subarray(i, i += e.length)); 
+            if (s + e.length > a.length) { 
+                const t = new Uint8Array(s + e.length); 
+                t.set(a.subarray(0, s)); 
+                t.set(e, s); 
+                a = t; 
+            } else a.set(e, s); 
+            s += e.length; 
+        } else if (m === 2) { 
+            const [e, t] = (()=>{
+                const e=new Uint16Array(32),t=new Uint16Array(32);
+                for(let n=0;n<32;n++)e[n]=g(); 
+                for(let n=0;n<32;n++)t[n]=g(); 
+                return [e,t]
+            })();
+            for (;;) { 
+                if (i >= c.length) throw new Error("Unexpected EOF in dynamic block");
+                const n = e[c[i++]]; 
+                if (n < 256) a[s++] = n; 
+                else if (n > 256) { 
+                    let r = n - 257; 
+                    const l = dt[r]; 
+                    let p = g(); 
+                    i += l; 
+                    p &= (1 << l) - 1; 
+                    if (i >= c.length) throw new Error("Unexpected EOF in length code");
+                    const f = c[i++]; 
+                    let u = bt[f], v = g(); 
+                    i += u; 
+                    v &= (1 << u) - 1; 
+                    const dist = v + 1;
+                    if (s < dist) throw new Error("Invalid distance in deflate");
+                    for (let z = 0; z < p + 3; ++z) a[s + z] = a[s + z - dist]; 
+                    s += p + 3; 
+                } else break; 
+                if (s > a.length - 258) { 
+                    const newBuf = new Uint8Array(a.length + 32768); 
+                    newBuf.set(a); 
+                    a = newBuf; 
+                } 
+            } 
+        } else if (m) { 
+            throw new Error(`Invalid block type ${m}`); 
+        } 
+        if (y) break; 
+    } 
+    return a.subarray(0, s); 
+};
+const g = () => {
+    if (i + 1 >= c.length) throw new Error("Unexpected EOF in length/distance code");
+    const e = c[i++], t = c[i++]; 
+    return e | t << 8
+};
 // --- END INLINED FFLATE LIBRARY ---
 
 const corsHeaders = {
@@ -116,12 +181,23 @@ async function getGraphApiAccessToken(env) {
 
 async function handleStartAnalysis(request, env, ctx) {
     try {
+        // Add basic request size limit check
+        const contentLength = request.headers.get('Content-Length');
+        if (contentLength && parseInt(contentLength) > 100 * 1024 * 1024) { // 100MB limit
+            return new Response(JSON.stringify({ error: '请求体过大，文件大小超过100MB限制。' }), { status: 413, headers: corsHeaders });
+        }
+        
         const formData = await request.formData();
         const userPrompt = formData.get('userPrompt');
         const file = formData.get('file');
 
         if (!file || !userPrompt) {
             return new Response(JSON.stringify({ error: '请求无效，缺少文件或指令。' }), { status: 400, headers: corsHeaders });
+        }
+        
+        // Validate file type
+        if (!file.type && !file.name.toLowerCase().endsWith('.zip')) {
+            return new Response(JSON.stringify({ error: '不支持的文件类型，仅支持ZIP文件。' }), { status: 400, headers: corsHeaders });
         }
         
         const accessToken = await getGraphApiAccessToken(env);
@@ -164,7 +240,17 @@ async function handleStartAnalysis(request, env, ctx) {
 }
 
 async function handleGetResult(pathname, env) {
+    // Validate path to prevent directory traversal
     const resultKey = pathname.substring(1);
+    if (resultKey.includes('..') || resultKey.includes('/../')) {
+        return new Response('Invalid path', { status: 400 });
+    }
+    
+    // Ensure path is under results directory
+    if (!resultKey.startsWith('results/')) {
+        return new Response('Invalid path', { status: 400 });
+    }
+    
     try {
         const accessToken = await getGraphApiAccessToken(env);
         const userId = env.MS_USER_ID || 'me';
@@ -204,13 +290,19 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     };
     let finalReport = `Gemini 分析报告\n==================\n\n用户指令: ${userPrompt}\n\n`;
     let fileCount = 0;
-    const BATCH_SIZE_LIMIT_BYTES = 4 * 1024 * 1024;
+    const BATCH_SIZE_LIMIT_BYTES = 4 * 1024 * 1024; // 4MB limit
     let currentBatchParts = [];
     let currentBatchSizeBytes = 0;
 
     const processFileEntry = async (fileData, filePath) => {
         fileCount++;
         if (fileData.length === 0) return;
+
+        // Security: Validate file path to prevent directory traversal
+        if (filePath.includes('..') || filePath.includes('/../')) {
+            console.warn(`Skipping file with invalid path: ${filePath}`);
+            return;
+        }
 
         const extension = `.${filePath.split('.').pop()?.toLowerCase()}`;
         const contentHeader = `\n\n--- 文件: ${filePath} ---\n`;
@@ -223,7 +315,9 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
         } else if (fileTypes['核心文本/代码 (Core Text/Code)'].includes(extension)) {
             try {
                 const textContent = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(fileData);
-                partSegments = [{ text: contentHeader + sanitizeText(textContent) }];
+                // Limit text content to prevent huge files from breaking the analysis
+                const limitedContent = textContent.length > 100000 ? textContent.substring(0, 100000) + '... [内容被截断]' : textContent;
+                partSegments = [{ text: contentHeader + sanitizeText(limitedContent) }];
             } catch (e) {
                 partSegments = [{ text: contentHeader + "[文件内容无法被识别为UTF-8编码，已跳过。]" }];
             }
@@ -290,7 +384,11 @@ async function processBatch(parts, userPrompt, env) {
     if (!GOOGLE_API_KEY) throw new Error("未配置 'GOOGLE_API_KEY'。");
     const model = 'gemini-2.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_API_KEY}`;
-    const payload = { contents: [{ parts: [{text: userPrompt}, ...parts] }] };
+    
+    // Limit the number of parts to avoid exceeding API limits
+    const limitedParts = parts.length > 50 ? parts.slice(0, 50) : parts;
+    const payload = { contents: [{ parts: [{text: userPrompt}, ...limitedParts] }] };
+    
     const apiResponse = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -361,7 +459,7 @@ const html =
 '                <textarea id="user_prompt" name="userPrompt" rows="4" class="w-full p-3 border border-gray-300 rounded-md" placeholder="例如：请分别总结每个学生的作业情况，并进行打分。" required></textarea>' +
 '            </div>' +
 '            <div class="mb-5">' +
-'                 <label for="file-upload" class="block mb-2 text-md font-medium text-gray-700">选择作业文件夹 或 作业ZIP包:</label>' +
+'                 <label for="file-upload" class="block mb-2 text-md font-medium text-gray-700">选择作业文件夹 或 作业ZIP包 (最大100MB):</label>' +
 '                <input type="file" name="files" id="file-upload" webkitdirectory directory multiple class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700" required/>' +
 '            </div>' +
 '            <button type="submit" id="submit-btn" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-md disabled:opacity-50">开始分析</button>' +
@@ -377,6 +475,17 @@ const html =
 '            e.preventDefault();' +
 '            const files = fileUpload.files;' +
 '            if (files.length === 0) { updateStatus("错误：请选择一个文件夹或ZIP文件。", "error"); return; }' +
+'            ' +
+'            // Check total file size' +
+'            let totalSize = 0;' +
+'            for (const file of files) {' +
+'                totalSize += file.size;' +
+'            }' +
+'            if (totalSize > 100 * 1024 * 1024) { // 100MB limit' +
+'                updateStatus("错误：总文件大小超过100MB限制。", "error");' +
+'                return;' +
+'            }' +
+'            ' +
 '            setLoadingState(true, "正在准备文件...");' +
 '            try {' +
 '                let fileToUpload;' +
@@ -475,4 +584,6 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
+
 
