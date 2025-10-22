@@ -1,12 +1,30 @@
-name = "gemini-onedrive-analyzer"
-main = "worker.js"
-compatibility_date = "2023-10-30"
+name: Deploy Worker
 
-# This build configuration is essential for multi-module projects.
-# It tells Wrangler to package all necessary files from the directory.
-[build]
-command = ""
-[build.upload]
-format = "modules"
+on:
+  push:
+    branches:
+      - main # This workflow runs only on pushes to the main branch
 
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # This 'secrets' block tells Wrangler which secrets to upload to the Worker's environment.
+          # This list format is the clearest and most reliable way to define them.
+          secrets: [
+            'GOOGLE_API_KEY',
+            'MS_TENANT_ID',
+            'MS_CLIENT_ID',
+            'MS_CLIENT_SECRET',
+            'MS_USER_ID'
+          ]
 
