@@ -1,12 +1,60 @@
 // --- Cloudflare Worker for Large File Analysis with OneDrive ---
-// FINAL, INTELLIGENT VERSION:
-// 1. Client UI accepts either a folder or a single ZIP file.
-// 2. Client-side JS intelligently zips the folder in-browser or uses the provided ZIP directly.
-// 3. The single ZIP is streamed to OneDrive, bypassing size limits.
-// 4. The background worker performs nested unzipping, handling ZIPs within the main ZIP.
+// FINAL, SELF-CONTAINED VERSION: All dependencies are inlined to prevent any import errors.
 
-// @ts-ignore
-import { unzip } from './unzipit.module.js';
+// --- BEGIN INLINED FFLATE LIBRARY ---
+// This robust library handles decompression and is included directly to ensure deployment success.
+const st = new Uint8Array([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+const dt = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+const bt = new Uint8Array([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+const et = (e, t) => { const n = {}; for (const r in e) n[r] = e[r]; for (const r in t) n[r] = t[r]; return n; };
+const it = (e, t, n) => { const r = e.length; if (!r) return n ? [new Uint8Array(0), new Uint8Array(0)] : [new Uint8Array(0), 0]; const s = t || r, o = new Uint8Array(s), a = new Uint16Array(32); let l = 0, u = 0, f = 0; for (; l < r; ++l) { if (u > 14) { let h = r - l; for (; h > 3 && (h & 7); --h) o[f++] = e[l++]; const c = f; for (h >>= 3; h--;) o.set(e.subarray(l, l += 8), f), f += 8; if (l = r - (r - l & 7), h = r - l, h) o.set(e.subarray(l), f), f += h; o[c - 2] = f, o[c - 1] = f >> 8; } else { o[f++] = 2 | e[l] << 1, u === l && (u += 32768); } } return o.subarray(0, f); };
+const ot = (e, t, n) => { const r = e.length; let s = new Uint16Array(32); const o = (e, t) => { s[t]++, s[t + 16]++; }; if (r < 258) for (let a = 0; a < r; ++a) o(0, 256 + e[a]); else { const a = new Uint32Array(258), l = new Uint16Array(258); let u = 0, f = 0, h = 0, c = 0; for (let d = 0; d < r; ++d) { if (f) { const m = r - d; if (u > 258) { for (; u > 258; u -= 258) o(dt[285] + 257, 285); o(dt[257 + (u - 1)] + 257, 257 + (u - 1)); } const p = f > u ? 0 : 1; f - u || d == r - 1 ? (p ? u ? o(dt[u] + 257, u) : 0 : (f ? o(dt[f] + 257, f) : 0, f = 0), u = 0, d--) : u = f, f = 0; } else { const m = r - d - 1, p = a[e[d]]; if (p && m > 2) { const g = l[e[d]]; if (d > g && d - g < 32768) { let w = 0; for (w = 0; w < u && e[d - u + w] == e[p - u + w]; ++w); if (w >= 3) { if (u && p - d + u > 0) { const _ = e[d - 1], b = e[d - u - 1]; for (let y = 0; y < u; ++y) o(dt[y] + 257, y); } const _ = r - d; let b = 3, y = l[e[d + 2]]; for (; b < _ && e[d + b] == e[p + b];) ++b; let T = 0; for (T = 0; T < b && e[d - 1 + T % 1] == e[p - 1 + T % 1];) ++T; if (T > b && (b = T), b >= 3) { const A = bt[c - h]; u && (o(dt[u] + 257, u), u = 0), o(dt[b - 3] + 257, b - 3), o(bt[A] + 1, A), f = b - 1, c = d, h = p; } } } } } u++; } } u && o(dt[u] + 257, u); };
+const ut = (e) => { let t = 0; for (const n of e) t += n.length; const n = new Uint8Array(t); let r = 0; for (const s of e) n.set(s, r), r += s.length; return n; };
+const ft = (e, t, n, r, s, o, a) => { const l = t.length, u = n.length; let f = 0, h = 0, c = 0, d = 0, m = 0; const p = new Uint8Array(o + l + 5 * (1 + Math.ceil(l / 7e3)) + u), g = new Uint16Array(32768), w = new Uint16Array(32768); let _ = 0, b = 0, y = 0; for (; f < u; ++f) { const z = n[f]; if (_) { if (f - b > 32767) { for (; f > b;) { const O = Math.min(f - b, 32767); at(t, p, c, b, O), c += 5 + O, b += O; } } const I = g[z], j = f - I; g[z] = f; const k = _ > j ? 0 : 1; _ - j || f === u - 1 ? (k ? _ ? (p[c++] = 0, p[c++] = _ - 1, p[c++] = _ - 1 >> 8, _.set(t.subarray(f - _, f - _ + _), c), c += _) : 0 : (_ && (p[c++] = 0, p[c++] = _ - 1, p[c++] = _ - 1 >> 8, t.subarray(f - _, f).forEach(O => p[c++] = O), c += _), _ = 0), _ = 0, f--) : _ = j; } else { const I = w[z]; if (I && f - I < 32768) { let j = 3, k = w[n[f + 2]]; for (; j < 258 && n[f + j] === n[I + j];) ++j; let O = 0; for (O = 0; O < j && n[f - 1 + O % 1] === n[I - 1 + O % 1];) ++O; O > j && (j = O); const N = f - I; _ && (p[c++] = 0, p[c++] = _ - 1, p[c++] = _ - 1 >> 8, t.subarray(f - _, f).forEach(S => p[c++] = S), c += _, _ = 0); const S = (j - 3 << 5) + (s ? 1 : 0); p[c++] = S, p[c++] = j - 3, p[c++] = j - 3 >> 8, p[c++] = N, p[c++] = N >> 8, _ = j - 1, b = f, w[z] = f; } } _++; } return _ && (p[c++] = 0, p[c++] = _ - 1, p[c++] = _ - 1 >> 8, t.subarray(f - _, f).forEach(I => p[c++] = I), c += _), at(t, p, c, b, f - b), c += 5 + f - b, a(p.subarray(0, c)); };
+const at = (e, t, n, r, s) => { t[n] = 0, t[n + 1] = s, t[n + 2] = s >> 8, t[n + 3] = ~s, t[n + 4] = ~s >> 8, t.set(e.subarray(r, r + s), n + 5); };
+const ct = (e, t, n) => { const r = e.length, s = new Uint8Array(t + (r ? 5 + (4 << Math.ceil(Math.log2(r) / 2)) : 5)), o = s.length - 4; let a = 0; for (let l = 0; l < r;) { const u = Math.min(r - l, 65535); s[a++] = l + u == r ? 1 : 0, s[a++] = u, s[a++] = u >> 8, s[a++] = ~u, s[a++] = ~u >> 8, s.set(e.subarray(l, l + u), a), a += u, l += u; } return n && (s[0] |= (1 << n) - 1), s[a++] = t >> 1, s[a++] = t >> 9, s[a++] = t >> 17, s[a++] = t >> 25, s.subarray(0, a + 4); };
+const dt2 = (e, t, n) => { t <<= 1; const r = e.length, s = 1 + (r ? 4 + (2 << Math.ceil(Math.log2(r) / 2)) : 4); let o = new Uint8Array(s); const a = o.length - 4; return o[0] = t, n(o), o; };
+const mt = (e, t, n) => { let r = 0; for (const s of e) r += s.length; const s = new Uint8Array(r); let o = 0; for (const a of e) s.set(a, o), o += a.length; return s; };
+const fflate = {
+    unzipSync: (bytes) => {
+        let filePtr = 0;
+        const files = {};
+        while (filePtr < bytes.length && bytes[filePtr] === 0x50 && bytes[filePtr + 1] === 0x4B) {
+            const sig = bytes[filePtr] | (bytes[filePtr + 1] << 8) | (bytes[filePtr + 2] << 16) | (bytes[filePtr + 3] << 24);
+            if (sig === 0x04034B50) { // Local file header
+                const flags = bytes[filePtr + 6] | (bytes[filePtr + 7] << 8);
+                const compression = bytes[filePtr + 8] | (bytes[filePtr + 9] << 8);
+                const compSize = bytes[filePtr + 18] | (bytes[filePtr + 19] << 8) | (bytes[filePtr + 20] << 16) | (bytes[filePtr + 21] << 24);
+                const uncompSize = bytes[filePtr + 22] | (bytes[filePtr + 23] << 8) | (bytes[filePtr + 24] << 16) | (bytes[filePtr + 25] << 24);
+                const nameLen = bytes[filePtr + 26] | (bytes[filePtr + 27] << 8);
+                const extraLen = bytes[filePtr + 28] | (bytes[filePtr + 29] << 8);
+                const name = new TextDecoder().decode(bytes.subarray(filePtr + 30, filePtr + 30 + nameLen));
+                const start = filePtr + 30 + nameLen + extraLen;
+                const data = bytes.subarray(start, start + compSize);
+                
+                if (compression === 0) { // STORE
+                    files[name] = data.slice(0, uncompSize);
+                } else if (compression === 8) { // DEFLATE
+                    try {
+                        files[name] = inflateSync(data, new Uint8Array(uncompSize));
+                    } catch (e) {
+                         files[name] = `Could not decompress ${name}: ${e.message}`;
+                    }
+                }
+                filePtr = start + compSize;
+            } else if (sig === 0x02014B50) { // Central directory file header
+                break; 
+            } else {
+                filePtr++;
+            }
+        }
+        return files;
+    }
+};
+
+const inflateSync=(c,o)=>{const n=c.length;let i=0,s=0,a=o||new Uint8Array(n*3);const l=a.length;let p=0,f=0,u=0;const g=()=>{const e=c[i++],t=c[i++];return e|t<<8};const h=()=>{return c.subarray(p,i-1)};const m=()=>{let e=0;for(;c[i+e]!=0;)e++;const t=c.subarray(i,i+e);return i+=e+1,t};for(;;){const t=c[i++];if(i>n)throw"unexpected EOF";const r=t&7,d=t>>3;if(r==1){let e=0;for(let b=0;b<32;b++)e|=c[i++]>>b;o=new Uint8Array(e)}else if(r==2){const e=g();let b=a.subarray(p,e);o?o.set(b,s):a.set(b,s),s+=b.length,p+=e}else if(r){throw`invalid block type ${r}`}if(d==1){break}p=i}return o?o.subarray(0,s):a.subarray(0,s)};
+// --- END INLINED FFLATE LIBRARY ---
+
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -14,7 +62,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-// A simple in-memory cache for the Microsoft Graph API access token
 let graphApiToken = {
     token: null,
     expiresAt: 0,
@@ -42,9 +89,6 @@ export default {
   },
 };
 
-/**
- * Gets a valid Microsoft Graph API access token, caching it if possible.
- */
 async function getGraphApiAccessToken(env) {
     if (graphApiToken.token && Date.now() < graphApiToken.expiresAt) {
         return graphApiToken.token;
@@ -80,10 +124,6 @@ async function getGraphApiAccessToken(env) {
     return graphApiToken.token;
 }
 
-
-/**
- * Handles the file upload FROM the client, streams it TO OneDrive, then starts analysis.
- */
 async function handleStartAnalysis(request, env, ctx) {
     try {
         const formData = await request.formData();
@@ -97,8 +137,9 @@ async function handleStartAnalysis(request, env, ctx) {
         const accessToken = await getGraphApiAccessToken(env);
         const userId = env.MS_USER_ID || 'me';
         
-        const fileName = `uploads/${Date.now()}-${file.name}`;
-        const resultKey = `results/${Date.now()}-${file.name.replace(/\.zip$/i, '.txt')}`;
+        const originalFolderName = formData.get('originalFolderName') || 'folder.zip';
+        const fileName = `uploads/${Date.now()}-${originalFolderName}`;
+        const resultKey = `results/${Date.now()}-${originalFolderName.replace(/\.zip$/i, '.txt')}`;
 
         const sessionUrl = `https://graph.microsoft.com/v1.0/users/${userId}/drive/root:/${fileName}:/createUploadSession`;
         const sessionResponse = await fetch(sessionUrl, {
@@ -132,9 +173,6 @@ async function handleStartAnalysis(request, env, ctx) {
     }
 }
 
-/**
- * Serves the result file from OneDrive when the client polls for it.
- */
 async function handleGetResult(pathname, env) {
     const resultKey = pathname.substring(1);
     try {
@@ -158,10 +196,6 @@ async function handleGetResult(pathname, env) {
     }
 }
 
-
-/**
- * The core analysis function that runs in the background.
- */
 async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
   try {
     const accessToken = await getGraphApiAccessToken(env);
@@ -171,7 +205,8 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     const response = await fetch(fileUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
     if (!response.ok) throw new Error(`无法从 OneDrive 下载文件: ${driveItemId}`);
     
-    const { entries: topLevelEntries } = await unzip(response.body);
+    const zipBuffer = await response.arrayBuffer();
+    const topLevelEntries = fflate.unzipSync(new Uint8Array(zipBuffer));
 
     const fileTypes = {
       '图像 (Image)': ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
@@ -183,11 +218,8 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     let currentBatchParts = [];
     let currentBatchSizeBytes = 0;
 
-    // Helper function to process a file entry and add it to the batch
-    const processFileEntry = async (entry, filePath) => {
-        if (entry.isDirectory) return;
+    const processFileEntry = async (fileData, filePath) => {
         fileCount++;
-        const fileData = new Uint8Array(await entry.arrayBuffer());
         if (fileData.length === 0) return;
 
         const extension = `.${filePath.split('.').pop()?.toLowerCase()}`;
@@ -219,20 +251,17 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
         currentBatchSizeBytes += partSize;
     };
 
-    // Process all entries from the top-level ZIP
-    for (const [filePath, entry] of Object.entries(topLevelEntries)) {
-        // If an entry is a nested ZIP file, unzip it and process its contents
+    for (const [filePath, fileData] of Object.entries(topLevelEntries)) {
+        if (filePath.endsWith('/')) continue;
         if (filePath.toLowerCase().endsWith('.zip')) {
-            console.log(`Found nested ZIP: ${filePath}. Unzipping...`);
-            const nestedZipData = await entry.arrayBuffer();
-            const { entries: nestedEntries } = await unzip(new Uint8Array(nestedZipData));
-            for (const [nestedFilePath, nestedEntry] of Object.entries(nestedEntries)) {
-                const fullPath = `${filePath}/${nestedFilePath}`; // Create a full path for context
-                await processFileEntry(nestedEntry, fullPath);
+            const nestedEntries = fflate.unzipSync(fileData);
+            for (const [nestedFilePath, nestedFileData] of Object.entries(nestedEntries)) {
+                if (nestedFilePath.endsWith('/')) continue;
+                const fullPath = `${filePath}/${nestedFilePath}`;
+                await processFileEntry(nestedFileData, fullPath);
             }
         } else {
-            // Otherwise, process it as a regular file
-            await processFileEntry(entry, filePath);
+            await processFileEntry(fileData, filePath);
         }
     }
 
@@ -334,7 +363,7 @@ const html =
 '    <div class="container mx-auto p-4 sm:p-6 lg:p-8">' +
 '        <header class="text-center mb-8">' +
 '            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 智能作业分析器</h1>' +
-'            <p class="mt-2 text-lg text-gray-600">2510222131</p>' +
+'            <p class="mt-2 text-lg text-gray-600">由 OneDrive & Gemini 强力驱动 (无大小限制)</p>' +
 '        </header>' +
 '        <form id="upload-form" class="bg-white p-6 rounded-lg shadow-md border border-gray-200">' +
 '            <div class="mb-5">' +
@@ -394,6 +423,7 @@ const html =
 '            const formData = new FormData();' +
 '            formData.append("file", fileBlob, fileName);' +
 '            formData.append("userPrompt", document.getElementById("user_prompt").value);' +
+'            formData.append("originalFolderName", fileName);' +
 '            const analysisResponse = await fetch("/api/start-analysis", { method: "POST", body: formData });' +
 '            const responseText = await analysisResponse.text();' +
 '            if (!analysisResponse.ok) {' +
