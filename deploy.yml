@@ -18,8 +18,6 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # This 'secrets' block tells Wrangler which secrets to upload to the Worker's environment.
-          # This list format is the clearest and most reliable way to define them.
           secrets: [
             'GOOGLE_API_KEY',
             'MS_TENANT_ID',
