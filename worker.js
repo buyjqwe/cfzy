@@ -142,9 +142,6 @@ async function handleStartAnalysis(request, env, ctx) {
         }
 
         // Stream the file upload directly to the OneDrive upload URL
-        // The uploadUrl expects specific headers and range for large files, but for simplicity here,
-        // we assume the initial session handles the first chunk or the entire file if it's small enough for a single PUT.
-        // For truly large files, multi-chunk upload logic would be needed here.
         const uploadResponse = await fetch(uploadUrl, {
             method: 'PUT',
             headers: { 
@@ -160,16 +157,11 @@ async function handleStartAnalysis(request, env, ctx) {
         }
 
         const uploadedFile = await uploadResponse.json();
-        const itemId = uploadedFile.id;
+        let itemId = uploadedFile.id;
 
         if (!itemId) {
              // If itemId is not available in the upload completion response, we might need to query for it by path.
-             // However, the completion response *should* contain the item details including the ID.
              console.warn("Upload completion response did not contain 'id'. Attempting to find file by path...");
-             // This step is complex and might require another API call based on the fileName.
-             // For now, let's assume the ID is present or fail gracefully.
-             // A more robust solution would be to list the 'uploads' folder and find the most recent file matching the pattern.
-             // As a fallback, we can try to get the item by its path.
              const itemByPathUrl = `https://graph.microsoft.com/v1.0/users/${userId}/drive/root:/${fileName}:/`;
              const itemResponse = await fetch(itemByPathUrl, {
                  headers: { 'Authorization': `Bearer ${accessToken}` }
@@ -236,12 +228,9 @@ async function handleGetResult(pathname, env) {
         
         console.log("Result file found and being served:", resultKey);
         // Stream the response back to the client
-        // Clone the response to potentially read headers
         const responseClone = response.clone();
-        // Ensure the content type is text/plain for the browser to handle it correctly as a text file
         const customHeaders = new Headers(responseClone.headers);
         customHeaders.set('Content-Type', 'text/plain; charset=utf-8');
-        // Optionally, force download: customHeaders.set('Content-Disposition', 'attachment; filename="analysis_report.txt"');
         
         return new Response(responseClone.body, { headers: customHeaders });
 
@@ -317,22 +306,22 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
       if (fileTypes['图像 (Image)'].includes(extension)) {
           const mimeType = getMimeType(extension);
           if (!mimeType.startsWith('image/')) {
-              console.warn("Skipping non-image file treated as image:", filePath);
-              partSegments = [{ text: contentHeader + "[非标准图像文件，已跳过。]" }];
+               console.warn("Skipping non-image file treated as image:", filePath);
+               partSegments = [{ text: contentHeader + "[非标准图像文件，已跳过。]" }];
           } else {
-              try {
-                  const base64 = arrayBufferToBase64(fileData.buffer);
-                  // Gemini API has size limits for image data, ensure base64 string is not too large
-                  if (base64.length > 4 * 1024 * 1024) { // 4MB check for base64 string
-                      console.warn("Image file too large for Gemini API, skipping:", filePath);
-                      partSegments = [{ text: contentHeader + "[图像文件过大，无法分析。]" }];
-                  } else {
-                      partSegments = [{ text: contentHeader }, { inlineData: { mimeType, data: base64 } }];
-                  }
-              } catch (e) {
-                  console.error("Error processing image:", filePath, e);
-                  partSegments = [{ text: contentHeader + `[图像处理错误: ${e.message}]` }];
-              }
+               try {
+                   const base64 = arrayBufferToBase64(fileData.buffer);
+                   // Gemini API has size limits for image data, ensure base64 string is not too large
+                   if (base64.length > 4 * 1024 * 1024) { // 4MB check for base64 string
+                       console.warn("Image file too large for Gemini API, skipping:", filePath);
+                       partSegments = [{ text: contentHeader + "[图像文件过大，无法分析。]" }];
+                   } else {
+                       partSegments = [{ text: contentHeader }, { inlineData: { mimeType, data: base64 } }];
+                   }
+               } catch (e) {
+                   console.error("Error processing image:", filePath, e);
+                   partSegments = [{ text: contentHeader + `[图像处理错误: ${e.message}]` }];
+               }
           }
       } else if (fileTypes['核心文本/代码 (Core Text/Code)'].includes(extension) || fileTypes['其他文本 (Other Text)'].includes(extension)) {
            try {
@@ -346,10 +335,10 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
                   textContent = textContent.substring(0, 100000) + "\n... [内容已被截断以符合API限制] ...";
               }
               partSegments = [{ text: contentHeader + textContent }];
-            } catch (e) {
+           } catch (e) {
               console.warn("File not UTF-8 decodable, skipping text analysis:", filePath, e.message);
               partSegments = [{ text: contentHeader + `[文件内容无法以UTF-8解码，已跳过。错误: ${e.message}]` }];
-            }
+           }
       } else {
           // Unsupported file type
           partSegments = [{ text: contentHeader + "[不支持分析的文件类型，已跳过。]" }];
@@ -357,7 +346,6 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
       }
 
       // Estimate the size of this part for batching purposes
-      // JSON.stringify is an approximation; actual API payload might be slightly different
       const partSizeEstimate = JSON.stringify(partSegments).length * sizeEstimationFactor;
 
       // Check if adding this part would exceed the batch size
@@ -422,7 +410,6 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
 
             if (!errorResponse.ok) {
                 console.error("Failed to save error report to OneDrive:", await errorResponse.text());
-                // Do not throw here as the main analysis already failed
             } else {
                 console.log("Error report saved to OneDrive:", resultKey);
             }
@@ -431,7 +418,6 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
         }
     } catch (tokenError) {
         console.error("Could not save error report due to token error:", tokenError);
-        // Do not throw here as the main analysis already failed
     }
   }
 }
@@ -447,18 +433,15 @@ async function processBatch(parts, userPrompt, env) {
         throw new Error("未配置 'GOOGLE_API_KEY' 环境变量。");
     }
 
-    const model = 'gemini-2.5-flash'; // Or 'gemini-2.0-flash' or 'gemini-1.5-pro'
+    const model = 'gemini-2.5-flash'; // Or 'gemini-pro' for more complex tasks
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_API_KEY}`;
     
     // Construct the payload for the Gemini API
-    // The user prompt is the first part, followed by the file parts
     const contentParts = [{ text: userPrompt }, ...parts];
     const payload = { 
         contents: [{ role: "user", parts: contentParts }], // Explicitly set role as 'user'
         generationConfig: {
              // Optional: Add parameters like temperature, maxOutputTokens if needed
-             // temperature: 0.5,
-             // maxOutputTokens: 2048,
         }
     };
 
@@ -473,15 +456,13 @@ async function processBatch(parts, userPrompt, env) {
             const errorBody = await apiResponse.text();
             console.error("Gemini API Error:", apiResponse.status, apiResponse.statusText, errorBody);
             
-            // Try to parse error details if possible
             let errorMessage = `API Error ${apiResponse.status}: ${apiResponse.statusText}`;
             try {
                 const errorJson = JSON.parse(errorBody);
                 if (errorJson.error && errorJson.error.message) {
-                     errorMessage += `. Details: ${errorJson.error.message}`;
+                      errorMessage += `. Details: ${errorJson.error.message}`;
                 }
             } catch (e) {
-                // If parsing fails, use the raw text
                 errorMessage += `. Raw response: ${errorBody.substring(0, 200)}...`; // Truncate long errors
             }
             
@@ -507,8 +488,8 @@ async function processBatch(parts, userPrompt, env) {
         return generatedText;
 
     } catch (e) {
-         console.error("Network or processing error calling Gemini API:", e);
-         return `\n[调用 Gemini API 时发生网络或处理错误: ${e.message}]\n`;
+       console.error("Network or processing error calling Gemini API:", e);
+       return `\n[调用 Gemini API 时发生网络或处理错误: ${e.message}]\n`;
     }
 }
 
@@ -539,227 +520,198 @@ function arrayBufferToBase64(buffer) {
 
 function sanitizeText(text) {
   if (typeof text !== 'string') return '';
-  // Remove null bytes, control characters (except common whitespace), and replace with a space or remove
   // Keeps \n, \r, \t
   return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' '); 
-  // Alternatively, to remove them: .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
 }
 
 
 // --- HTML User Interface ---
-const html = `
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini 大型文件分析器 (OneDrive版)</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
-        .container { max-width: 800px; }
-        #result-box, #status-box {
-            white-space: pre-wrap; word-wrap: break-word; background-color: #1e293b;
-            color: #e2e8f0; border-radius: 0.5rem; padding: 1.5rem; margin-top: 1.5rem;
-            line-height: 1.75; font-family: 'Courier New', Courier, monospace;
-            overflow-x: auto; /* Allow horizontal scrolling for long lines */
-        }
-        .loader {
-            display: inline-block;
-            border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%;
-            width: 20px; height: 20px; animation: spin 1s linear infinite; margin-right: 10px; vertical-align: middle;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .file-input::file-selector-button {
-            margin-right: 1rem;
-            background: #2563eb;
-            color: white;
-            border: none;
-            border-radius: 0.375rem;
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-        }
-        .file-input::file-selector-button:hover {
-            background: #1d4ed8;
-        }
-    </style>
-</head>
-<body class="antialiased text-gray-800">
-    <div class="container mx-auto p-4 sm:p-6 lg:p-8">
-        <header class="text-center mb-8">
-            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 大型文件分析器</h1>
-            <p class="mt-2 text-lg text-gray-600">由 OneDrive & Gemini 强力驱动</p>
-        </header>
-        <form id="upload-form" class="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-            <div class="mb-5">
-                <label for="user_prompt" class="block mb-2 text-md font-medium text-gray-700">你的分析指令:</label>
-                <textarea 
-                    id="user_prompt" 
-                    name="user_prompt" 
-                    rows="4" 
-                    class="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500" 
-                    placeholder="例如：请总结每个代码文件的主要功能和潜在问题。"
-                    required
-                ></textarea>
-            </div>
-            <div class="mb-5">
-                 <label for="zip-upload" class="block mb-2 text-md font-medium text-gray-700">选择一个 ZIP 压缩包上传 (最大 100MB):</label>
-                 <!-- Added max file size hint and accept -->
-                <input 
-                    type="file" 
-                    name="file" 
-                    id="zip-upload" 
-                    accept=".zip" 
-                    class="file-input w-full text-sm text-gray-500
-                          file:mr-4 file:py-2 file:px-4
-                          file:rounded-md file:border-0
-                          file:text-sm file:font-semibold
-                          "
-                    required
-                />
-            </div>
-            <button 
-                type="submit" 
-                id="submit-btn" 
-                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-                开始分析
-            </button>
-        </form>
-        <div id="status-container" class="mt-6"></div>
-    </div>
-    <script>
-        const form = document.getElementById('upload-form');
-        const submitBtn = document.getElementById('submit-btn');
-        const zipUpload = document.getElementById('zip-upload');
-        const statusContainer = document.getElementById('status-container');
-        const userPrompt = document.getElementById('user_prompt');
-
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const file = zipUpload.files[0];
-            if (!file) {
-                updateStatus('<p class="text-red-500 font-semibold">错误：请选择一个 ZIP 文件。</p>', 'error');
-                return;
-            }
-            // Optional: Client-side file size check (can be bypassed, server check is essential)
-            if (file.size > 100 * 1024 * 1024) { // 100MB
-                 updateStatus('<p class="text-red-500 font-semibold">错误：文件过大（超过100MB），请上传较小的文件。</p>', 'error');
-                 return;
-            }
-            setLoadingState(true, '正在上传文件并启动分析... 这可能需要几分钟时间，请勿关闭页面。');
-            try {
-                const formData = new FormData();
-                formData.append('file', file); // Use 'file' to match server-side get('file')
-                formData.append('userPrompt', userPrompt.value);
-                const analysisResponse = await fetch('/api/start-analysis', {
-                    method: 'POST',
-                    body: formData, // Send FormData directly
-                });
-                
-                const responseText = await analysisResponse.text(); // Always read response text for error details
-                
-                if (!analysisResponse.ok) {
-                    let errorMessage = '启动分析任务失败。';
-                    try {
-                        // Try to parse as JSON for structured error
-                        const errorData = JSON.parse(responseText);
-                        errorMessage = errorData.error || errorMessage;
-                    } catch (e) {
-                        // If not JSON, use the raw text
-                        errorMessage = responseText || errorMessage;
-                    }
-                    throw new Error(errorMessage);
-                }
-                
-                const analysisData = JSON.parse(responseText); // Parse successful JSON response
-                updateStatus('文件上传成功！分析任务已在后台运行。正在等待最终报告...', 'loading');
-                pollForResult(analysisData.resultKey);
-            } catch (error) {
-                console.error('流程错误:', error);
-                updateStatus('发生错误：' + error.message, 'error');
-                setLoadingState(false);
-            }
-        });
-
-        function pollForResult(resultKey) {
-            const pollInterval = 15000; // 15 seconds
-            const maxAttempts = 120; // 120 * 15s = 30 minutes
-            let attempts = 0;
-            const intervalId = setInterval(async () => {
-                if (attempts++ > maxAttempts) {
-                    clearInterval(intervalId);
-                    updateStatus('分析超时（30分钟）。请检查文件或联系支持。', 'error');
-                    setLoadingState(false);
-                    return;
-                }
-                console.log('Polling for result, attempt', attempts, 'for key:', resultKey);
-                try {
-                    const resultResponse = await fetch('/' + resultKey);
-                    if (resultResponse.status === 200) {
-                        clearInterval(intervalId);
-                        const reportText = await resultResponse.text();
-                        updateStatus('分析完成！', 'success');
-                        displayResult(reportText, resultKey);
-                        setLoadingState(false);
-                    } else if (resultResponse.status === 404) {
-                        // Still processing, continue polling
-                        console.log('Result not ready yet (404), continuing to poll.');
-                    } else {
-                        // Other error occurred
-                        clearInterval(intervalId);
-                        const errorText = await resultResponse.text();
-                        throw new Error('获取结果时发生服务器错误: ' + resultResponse.status + ' ' + errorText);
-                    }
-                } catch (error) {
-                    clearInterval(intervalId);
-                    console.error('轮询错误:', error);
-                    updateStatus('获取结果失败：' + error.message, 'error');
-                    setLoadingState(false);
-                }
-            }, pollInterval);
-        }
-
-        function setLoadingState(isLoading, message = '') {
-            submitBtn.disabled = isLoading;
-            submitBtn.textContent = isLoading ? '处理中...' : '开始分析';
-            if (isLoading) {
-                updateStatus(message, 'loading');
-            }
-        }
-
-        function updateStatus(message, type) {
-            let content = '';
-            if (type === 'loading') {
-                content = '<div id="status-box"><div class="loader"></div><span>' + message + '</span></div>';
-            } else if (type === 'error') {
-                content = '<div id="status-box"><p class="text-red-500 font-semibold">' + message + '</p></div>';
-            } else { // success
-                 content = '<div id="status-box"><p class="text-green-500 font-semibold">' + message + '</p></div>';
-            }
-            statusContainer.innerHTML = content;
-        }
-
-        function displayResult(reportText, resultKey) {
-            // Sanitize reportText to prevent XSS, though server should ideally handle this
-            const sanitizedText = reportText
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;");
-
-            const resultHtml = 
-                '<div id="result-box">' +
-                    '<a href="/' + resultKey + '" target="_blank" class="float-right bg-gray-600 hover:bg-gray-500 text-white font-bold py-1 px-3 rounded-md text-sm transition duration-200 no-underline">在新标签页打开报告</a>' + // Changed from download to view in new tab
-                    '<pre>' + sanitizedText + '</pre>' + // Use <pre> to preserve formatting
-                '</div>';
-            statusContainer.innerHTML += resultHtml;
-        }
-    </script>
-</body>
-</html>
-`;
-}
-
-
+const html = 
+'<!DOCTYPE html>' +
+'<html lang="zh-CN">' +
+'<head>' +
+'    <meta charset="UTF-8">' +
+'    <meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+'    <title>Gemini 大型文件分析器 (OneDrive版)</title>' +
+'    <script src="https://cdn.tailwindcss.com"></script>' +
+'    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">' +
+'    <style>' +
+'        body { font-family: \'Inter\', sans-serif; background-color: #f3f4f6; }' +
+'        .container { max-width: 800px; }' +
+'        #result-box, #status-box {' +
+'            white-space: pre-wrap; word-wrap: break-word; background-color: #1e293b;' +
+'            color: #e2e8f0; border-radius: 0.5rem; padding: 1.5rem; margin-top: 1.5rem;' +
+'            line-height: 1.75; font-family: \'Courier New\', Courier, monospace;' +
+'            overflow-x: auto; /* Allow horizontal scrolling for long lines */' +
+'        }' +
+'        .loader {' +
+'            display: inline-block;' +
+'            border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%;' +
+'            width: 20px; height: 20px; animation: spin 1s linear infinite; margin-right: 10px; vertical-align: middle;' +
+'        }' +
+'        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }' +
+'        .file-input::file-selector-button {' +
+'            margin-right: 1rem;' +
+'            background: #2563eb;' +
+'            color: white;' +
+'            border: none;' +
+'            border-radius: 0.375rem;' +
+'            padding: 0.5rem 1rem;' +
+'            cursor: pointer;' +
+'        }' +
+'        .file-input::file-selector-button:hover {' +
+'            background: #1d4ed8;' +
+'        }' +
+'    </style>' +
+'</head>' +
+'<body class="antialiased text-gray-800">' +
+'    <div class="container mx-auto p-4 sm:p-6 lg:p-8">' +
+'        <header class="text-center mb-8">' +
+'            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 大型文件分析器</h1>' +
+'            <p class="mt-2 text-lg text-gray-600">由 OneDrive & Gemini 强力驱动</p>' +
+'        </header>' +
+'        <form id="upload-form" class="bg-white p-6 rounded-lg shadow-md border border-gray-200">' +
+'            <div class="mb-5">' +
+'                <label for="user_prompt" class="block mb-2 text-md font-medium text-gray-700">你的分析指令:</label>' +
+'                <textarea ' +
+'                    id="user_prompt" ' +
+'                    name="user_prompt" ' +
+'                    rows="4" ' +
+'                    class="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500" ' +
+'                    placeholder="例如：请总结每个代码文件的主要功能和潜在问题。"' +
+'                    required' +
+'                ></textarea>' +
+'            </div>' +
+'            <div class="mb-5">' +
+'                <label for="zip-upload" class="block mb-2 text-md font-medium text-gray-700">选择一个 ZIP 压缩包上传 (最大 100MB):</label>' +
+'                <input ' +
+'                    type="file" ' +
+'                    name="file" ' +
+'                    id="zip-upload" ' +
+'                    accept=".zip" ' +
+'                    class="file-input w-full text-sm text-gray-500"' +
+'                    required' +
+'                />' +
+'            </div>' +
+'            <button ' +
+'                type="submit" ' +
+'                id="submit-btn" ' +
+'                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"' +
+'            >' +
+'                开始分析' +
+'            </button>' +
+'        </form>' +
+'        <div id="status-container" class="mt-6"></div>' +
+'    </div>' +
+'    <script>' +
+'        const form = document.getElementById(\'upload-form\');' +
+'        const submitBtn = document.getElementById(\'submit-btn\');' +
+'        const zipUpload = document.getElementById(\'zip-upload\');' +
+'        const statusContainer = document.getElementById(\'status-container\');' +
+'        const userPrompt = document.getElementById(\'user_prompt\');' +
+'        form.addEventListener(\'submit\', async (e) => {' +
+'            e.preventDefault();' +
+'            const file = zipUpload.files[0];' +
+'            if (!file) {' +
+'                updateStatus(\'<p class="text-red-500 font-semibold">错误：请选择一个 ZIP 文件。</p>\', \'error\');' +
+'                return;' +
+'            }' +
+'            if (file.size > 100 * 1024 * 1024) { ' +
+'                updateStatus(\'<p class="text-red-500 font-semibold">错误：文件过大（超过100MB），请上传较小的文件。</p>\', \'error\');' +
+'                return;' +
+'            }' +
+'            setLoadingState(true, \'正在上传文件并启动分析... 这可能需要几分钟时间，请勿关闭页面。\');' +
+'            try {' +
+'                const formData = new FormData();' +
+'                formData.append(\'file\', file);' +
+'                formData.append(\'userPrompt\', userPrompt.value);' +
+'                const analysisResponse = await fetch(\'/api/start-analysis\', {' +
+'                    method: \'POST\',' +
+'                    body: formData,' +
+'                });' +
+'                const responseText = await analysisResponse.text();' +
+'                if (!analysisResponse.ok) {' +
+'                    let errorMessage = \'启动分析任务失败。\';' +
+'                    try {' +
+'                        const errorData = JSON.parse(responseText);' +
+'                        errorMessage = errorData.error || errorMessage;' +
+'                    } catch (e) {' +
+'                        errorMessage = responseText || errorMessage;' +
+'                    }' +
+'                    throw new Error(errorMessage);' +
+'                }' +
+'                const analysisData = JSON.parse(responseText);' +
+'                updateStatus(\'文件上传成功！分析任务已在后台运行。正在等待最终报告...\', \'loading\');' +
+'                pollForResult(analysisData.resultKey);' +
+'            } catch (error) {' +
+'                console.error(\'流程错误:\', error);' +
+'                updateStatus(\'发生错误：\' + error.message, \'error\');' +
+'                setLoadingState(false);' +
+'            }' +
+'        });' +
+'        function pollForResult(resultKey) {' +
+'            const pollInterval = 15000;' +
+'            const maxAttempts = 120;' +
+'            let attempts = 0;' +
+'            const intervalId = setInterval(async () => {' +
+'                if (attempts++ > maxAttempts) {' +
+'                    clearInterval(intervalId);' +
+'                    updateStatus(\'分析超时（30分钟）。请检查文件或联系支持。\', \'error\');' +
+'                    setLoadingState(false);' +
+'                    return;' +
+'                }' +
+'                console.log(\'Polling for result, attempt \', attempts, \' for key:\', resultKey);' +
+'                try {' +
+'                    const resultResponse = await fetch(\'/\' + resultKey);' +
+'                    if (resultResponse.status === 200) {' +
+'                        clearInterval(intervalId);' +
+'                        const reportText = await resultResponse.text();' +
+'                        updateStatus(\'分析完成！\', \'success\');' +
+'                        displayResult(reportText, resultKey);' +
+'                        setLoadingState(false);' +
+'                    } else if (resultResponse.status === 404) {' +
+'                        console.log(\'Result not ready yet (404), continuing to poll.\');' +
+'                    } else {' +
+'                        clearInterval(intervalId);' +
+'                        const errorText = await resultResponse.text();' +
+'                        throw new Error(\'获取结果时发生服务器错误: \' + resultResponse.status + \' \' + errorText);' +
+'                    }' +
+'                } catch (error) {' +
+'                    clearInterval(intervalId);' +
+'                    console.error(\'轮询错误:\', error);' +
+'                    updateStatus(\'获取结果失败：\' + error.message, \'error\');' +
+'                    setLoadingState(false);' +
+'                }' +
+'            }, pollInterval);' +
+'        }' +
+'        function setLoadingState(isLoading, message = \'\') {' +
+'            submitBtn.disabled = isLoading;' +
+'            submitBtn.textContent = isLoading ? \'处理中...\' : \'开始分析\';' +
+'            if (isLoading) {' +
+'                updateStatus(message, \'loading\');' +
+'            }' +
+'        }' +
+'        function updateStatus(message, type) {' +
+'            let content = \'\';' +
+'            if (type === \'loading\') {' +
+'                content = \'<div id="status-box"><div class="loader"></div><span>\' + message + \'</span></div>\';' +
+'            } else if (type === \'error\') {' +
+'                content = \'<div id="status-box"><p class="text-red-500 font-semibold">\' + message + \'</p></div>\';' +
+'            } else { ' +
+'                content = \'<div id="status-box"><p class="text-green-500 font-semibold">\' + message + \'</p></div>\';' +
+'            }' +
+'            statusContainer.innerHTML = content;' +
+'        }' +
+'        function displayResult(reportText, resultKey) {' +
+'            const sanitizedText = reportText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");' +
+'            const resultHtml = ' +
+'                \'<div id="result-box">\' +' +
+'                    \'<a href="/\' + resultKey + \'" target="_blank" class="float-right bg-gray-600 hover:bg-gray-500 text-white font-bold py-1 px-3 rounded-md text-sm transition duration-200 no-underline">在新标签页打开报告</a>\' +' +
+'                    \'<pre>\' + sanitizedText + \'</pre>\' +' +
+'                \'</div>\';' +
+'            statusContainer.innerHTML += resultHtml;' +
+'        }' +
+'    </script>' +
+'</body>' +
+'</html>';
 
