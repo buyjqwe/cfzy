@@ -1,4 +1,3 @@
-// v1.1 - Forcing deployment refresh
 // --- Cloudflare Worker for Large File Analysis with OneDrive ---
 // Architecture:
 // 1. Client uploads a large ZIP file to the Worker.
@@ -271,7 +270,7 @@ async function processBatch(parts, userPrompt, env) {
         return `\n[一个分析批次失败: ${apiResponse.statusText}]\n`;
     }
     const resultJson = await apiResponse.json();
-    return resultJson.candidates?.[0]?.content?.parts?.[0]?.text || "\n[模型未返回有效内容]\n";
+    return resultJson.candidates?.[[0]]?.content?.parts?.[0]?.text || "\n[模型未返回有效内容]\n";
 }
 
 // --- Helper Functions ---
