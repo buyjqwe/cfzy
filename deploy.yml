@@ -1,0 +1,33 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - main # 确保这里是您正在使用的主要分支名称
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - uses: actions/checkout@v3
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # 将所有需要的密钥作为环境变量传递给 Wrangler
+          secrets: |
+            GOOGLE_API_KEY
+            MS_TENANT_ID
+            MS_CLIENT_ID
+            MS_CLIENT_SECRET
+            MS_USER_ID
+        env:
+          # GitHub Actions 需要在这里访问 secrets
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_USER_ID: ${{ secrets.MS_USER_ID }}
+

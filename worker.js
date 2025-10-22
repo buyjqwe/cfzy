@@ -1,3 +1,4 @@
+// v1.1 - Forcing deployment refresh
 // --- Cloudflare Worker for Large File Analysis with OneDrive ---
 // Architecture:
 // 1. Client uploads a large ZIP file to the Worker.
@@ -180,6 +181,7 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     
     const { entries } = await unzip(response.body);
 
+    // ... (The rest of the analysis logic is identical to the R2 version) ...
     const fileTypes = {
       '图像 (Image)': ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
       '核心文本/代码 (Core Text/Code)': ['.html', '.css', '.md', '.py', '.cs', '.json', '.js', '.txt'],
