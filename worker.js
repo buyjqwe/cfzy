@@ -1,6 +1,11 @@
-// --- Cloudflare Worker for Large Folder Analysis via Client-Side Zipping and OneDrive ---
-// This version imports the unzipit library from a local file.
+// --- Cloudflare Worker for Large File Analysis with OneDrive ---
+// FINAL, INTELLIGENT VERSION:
+// 1. Client UI accepts either a folder or a single ZIP file.
+// 2. Client-side JS intelligently zips the folder in-browser or uses the provided ZIP directly.
+// 3. The single ZIP is streamed to OneDrive, bypassing size limits.
+// 4. The background worker performs nested unzipping, handling ZIPs within the main ZIP.
 
+// @ts-ignore
 import { unzip } from './unzipit.module.js';
 
 const corsHeaders = {
@@ -83,7 +88,7 @@ async function handleStartAnalysis(request, env, ctx) {
     try {
         const formData = await request.formData();
         const userPrompt = formData.get('userPrompt');
-        const file = formData.get('file'); // This is the client-zipped blob
+        const file = formData.get('file');
 
         if (!file || !userPrompt) {
             return new Response(JSON.stringify({ error: '请求无效，缺少文件或指令。' }), { status: 400, headers: corsHeaders });
@@ -92,9 +97,8 @@ async function handleStartAnalysis(request, env, ctx) {
         const accessToken = await getGraphApiAccessToken(env);
         const userId = env.MS_USER_ID || 'me';
         
-        const originalFolderName = formData.get('originalFolderName') || 'folder.zip';
-        const fileName = `uploads/${Date.now()}-${originalFolderName}`;
-        const resultKey = `results/${Date.now()}-${originalFolderName.replace(/\.zip$/i, '.txt')}`;
+        const fileName = `uploads/${Date.now()}-${file.name}`;
+        const resultKey = `results/${Date.now()}-${file.name.replace(/\.zip$/i, '.txt')}`;
 
         const sessionUrl = `https://graph.microsoft.com/v1.0/users/${userId}/drive/root:/${fileName}:/createUploadSession`;
         const sessionResponse = await fetch(sessionUrl, {
@@ -167,8 +171,7 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     const response = await fetch(fileUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
     if (!response.ok) throw new Error(`无法从 OneDrive 下载文件: ${driveItemId}`);
     
-    // The backend still needs to unzip the file that was zipped by the client
-    const { entries } = await unzip(response.body);
+    const { entries: topLevelEntries } = await unzip(response.body);
 
     const fileTypes = {
       '图像 (Image)': ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
@@ -180,37 +183,59 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
     let currentBatchParts = [];
     let currentBatchSizeBytes = 0;
 
-    for (const [filePath, entry] of Object.entries(entries)) {
-      if (entry.isDirectory) continue;
-      fileCount++;
-      const fileData = new Uint8Array(await entry.arrayBuffer());
-      if (fileData.length === 0) continue;
-      const extension = `.${filePath.split('.').pop()?.toLowerCase()}`;
-      const contentHeader = `\n\n--- 文件: ${filePath} ---\n`;
-      let partSegments = [];
-      if (fileTypes['图像 (Image)'].includes(extension)) {
-          const mimeType = getMimeType(extension);
-          const base64 = arrayBufferToBase64(fileData.buffer);
-          partSegments = [{ text: contentHeader }, { inlineData: { mimeType, data: base64 } }];
-      } else if (fileTypes['核心文本/代码 (Core Text/Code)'].includes(extension)) {
-           try {
-              const textContent = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(fileData);
-              partSegments = [{ text: contentHeader + sanitizeText(textContent) }];
+    // Helper function to process a file entry and add it to the batch
+    const processFileEntry = async (entry, filePath) => {
+        if (entry.isDirectory) return;
+        fileCount++;
+        const fileData = new Uint8Array(await entry.arrayBuffer());
+        if (fileData.length === 0) return;
+
+        const extension = `.${filePath.split('.').pop()?.toLowerCase()}`;
+        const contentHeader = `\n\n--- 文件: ${filePath} ---\n`;
+        let partSegments = [];
+
+        if (fileTypes['图像 (Image)'].includes(extension)) {
+            const mimeType = getMimeType(extension);
+            const base64 = arrayBufferToBase64(fileData.buffer);
+            partSegments = [{ text: contentHeader }, { inlineData: { mimeType, data: base64 } }];
+        } else if (fileTypes['核心文本/代码 (Core Text/Code)'].includes(extension)) {
+            try {
+                const textContent = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(fileData);
+                partSegments = [{ text: contentHeader + sanitizeText(textContent) }];
             } catch (e) {
-              partSegments = [{ text: contentHeader + "[文件内容无法被识别为UTF-8编码，已跳过。]" }];
+                partSegments = [{ text: contentHeader + "[文件内容无法被识别为UTF-8编码，已跳过。]" }];
             }
-      } else {
-          partSegments = [{ text: contentHeader + "[不支持分析的文件类型，已跳过。]" }];
-      }
-      const partSize = JSON.stringify(partSegments).length;
-      if (currentBatchSizeBytes + partSize > BATCH_SIZE_LIMIT_BYTES && currentBatchParts.length > 0) {
-        finalReport += await processBatch(currentBatchParts, userPrompt, env);
-        currentBatchParts = [];
-        currentBatchSizeBytes = 0;
-      }
-      currentBatchParts.push(...partSegments);
-      currentBatchSizeBytes += partSize;
+        } else {
+            partSegments = [{ text: contentHeader + "[不支持分析的文件类型，已跳过。]" }];
+        }
+
+        const partSize = JSON.stringify(partSegments).length;
+        if (currentBatchSizeBytes + partSize > BATCH_SIZE_LIMIT_BYTES && currentBatchParts.length > 0) {
+            finalReport += await processBatch(currentBatchParts, userPrompt, env);
+            currentBatchParts = [];
+            currentBatchSizeBytes = 0;
+        }
+        currentBatchParts.push(...partSegments);
+        currentBatchSizeBytes += partSize;
+    };
+
+    // Process all entries from the top-level ZIP
+    for (const [filePath, entry] of Object.entries(topLevelEntries)) {
+        // If an entry is a nested ZIP file, unzip it and process its contents
+        if (filePath.toLowerCase().endsWith('.zip')) {
+            console.log(`Found nested ZIP: ${filePath}. Unzipping...`);
+            const nestedZipData = await entry.arrayBuffer();
+            const { entries: nestedEntries } = await unzip(new Uint8Array(nestedZipData));
+            for (const [nestedFilePath, nestedEntry] of Object.entries(nestedEntries)) {
+                const fullPath = `${filePath}/${nestedFilePath}`; // Create a full path for context
+                await processFileEntry(nestedEntry, fullPath);
+            }
+        } else {
+            // Otherwise, process it as a regular file
+            await processFileEntry(entry, filePath);
+        }
     }
+
     if (currentBatchParts.length > 0) {
       finalReport += await processBatch(currentBatchParts, userPrompt, env);
     }
@@ -286,7 +311,7 @@ const html =
 '<head>' +
 '    <meta charset="UTF-8">' +
 '    <meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-'    <title>Gemini 文件夹分析器 (智能打包版)</title>' +
+'    <title>Gemini 智能作业分析器</title>' +
 '    <script src="https://cdn.tailwindcss.com"></script>' +
 '    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>' +
 '    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">' +
@@ -308,17 +333,17 @@ const html =
 '<body class="antialiased text-gray-800">' +
 '    <div class="container mx-auto p-4 sm:p-6 lg:p-8">' +
 '        <header class="text-center mb-8">' +
-'            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 文件夹分析器</h1>' +
+'            <h1 class="text-3xl sm:text-4xl font-bold text-gray-900">Gemini 智能作业分析器</h1>' +
 '            <p class="mt-2 text-lg text-gray-600">由 OneDrive & Gemini 强力驱动 (无大小限制)</p>' +
 '        </header>' +
 '        <form id="upload-form" class="bg-white p-6 rounded-lg shadow-md border border-gray-200">' +
 '            <div class="mb-5">' +
 '                <label for="user_prompt" class="block mb-2 text-md font-medium text-gray-700">你的分析指令:</label>' +
-'                <textarea id="user_prompt" name="userPrompt" rows="4" class="w-full p-3 border border-gray-300 rounded-md" placeholder="例如：请分别总结每个学生的作业情况。" required></textarea>' +
+'                <textarea id="user_prompt" name="userPrompt" rows="4" class="w-full p-3 border border-gray-300 rounded-md" placeholder="例如：请分别总结每个学生的作业情况，并进行打分。" required></textarea>' +
 '            </div>' +
 '            <div class="mb-5">' +
-'                 <label for="folder-upload" class="block mb-2 text-md font-medium text-gray-700">选择包含作业的文件夹:</label>' +
-'                <input type="file" name="files" id="folder-upload" webkitdirectory directory multiple class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700" required/>' +
+'                 <label for="file-upload" class="block mb-2 text-md font-medium text-gray-700">选择作业文件夹 或 作业ZIP包:</label>' +
+'                <input type="file" name="files" id="file-upload" webkitdirectory directory multiple class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700" required/>' +
 '            </div>' +
 '            <button type="submit" id="submit-btn" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-md disabled:opacity-50">开始分析</button>' +
 '        </form>' +
@@ -327,42 +352,61 @@ const html =
 '    <script>' +
 '        const form = document.getElementById(\'upload-form\');' +
 '        const submitBtn = document.getElementById(\'submit-btn\');' +
-'        const folderUpload = document.getElementById(\'folder-upload\');' +
+'        const fileUpload = document.getElementById(\'file-upload\');' +
 '        const statusContainer = document.getElementById(\'status-container\');' +
 '        form.addEventListener(\'submit\', async (e) => {' +
 '            e.preventDefault();' +
-'            const files = folderUpload.files;' +
-'            if (files.length === 0) { updateStatus("错误：请选择一个文件夹。", "error"); return; }' +
-'            setLoadingState(true, "正在浏览器中打包文件夹...这可能需要一些时间。");' +
+'            const files = fileUpload.files;' +
+'            if (files.length === 0) { updateStatus("错误：请选择一个文件夹或ZIP文件。", "error"); return; }' +
+'            setLoadingState(true, "正在准备文件...");' +
 '            try {' +
-'                const zip = new JSZip();' +
-'                let folderName = "";' +
-'                for (const file of files) {' +
-'                    zip.file(file.webkitRelativePath, file);' +
-'                    if (!folderName) { folderName = file.webkitRelativePath.split("/")[0]; }' +
+'                let fileToUpload;' +
+'                let fileName;' +
+'                // Scenario 1: User selected a folder (multiple files or has relative path)' +
+'                if (files.length > 1 || (files[0] && files[0].webkitRelativePath)) {' +
+'                    updateStatus("正在浏览器中打包文件夹...", "loading");' +
+'                    const zip = new JSZip();' +
+'                    let folderName = "";' +
+'                    for (const file of files) {' +
+'                        zip.file(file.webkitRelativePath, file);' +
+'                        if (!folderName) { folderName = file.webkitRelativePath.split("/")[0]; }' +
+'                    }' +
+'                    fileToUpload = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 1 } });' +
+'                    fileName = folderName + ".zip";' +
+'                } else if (files.length === 1) {' +
+'                    // Scenario 2: User uploaded a single file' +
+'                    const singleFile = files[0];' +
+'                    if (!singleFile.name.toLowerCase().endsWith(".zip")) {' +
+'                         updateStatus("错误：如果您只选择一个文件，它必须是 .zip 格式。", "error");' +
+'                         setLoadingState(false);' +
+'                         return;' +
+'                    }' +
+'                    fileToUpload = singleFile;' +
+'                    fileName = singleFile.name;' +
 '                }' +
-'                const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 1 } });' +
-'                updateStatus("文件夹打包完成，正在上传到OneDrive...", "loading");' +
-'                const formData = new FormData();' +
-'                formData.append("file", zipBlob, folderName + ".zip");' +
-'                formData.append("userPrompt", document.getElementById("user_prompt").value);' +
-'                formData.append("originalFolderName", folderName + ".zip");' +
-'                const analysisResponse = await fetch("/api/start-analysis", { method: "POST", body: formData });' +
-'                const responseText = await analysisResponse.text();' +
-'                if (!analysisResponse.ok) {' +
-'                    let msg = "启动分析任务失败。";' +
-'                    try { msg = JSON.parse(responseText).error || msg; } catch (err) { msg = responseText || msg; }' +
-'                    throw new Error(msg);' +
-'                }' +
-'                const analysisData = JSON.parse(responseText);' +
-'                updateStatus("文件上传成功！分析任务已在后台运行...", "loading");' +
-'                pollForResult(analysisData.resultKey);' +
+'                await uploadAndStartAnalysis(fileToUpload, fileName);' +
 '            } catch (error) {' +
 '                console.error("Submit Error:", error);' +
 '                updateStatus("发生错误：" + error.message, "error");' +
 '                setLoadingState(false);' +
 '            }' +
 '        });' +
+'        async function uploadAndStartAnalysis(fileBlob, fileName) {' +
+'            updateStatus("文件准备就绪，正在上传到OneDrive...", "loading");' +
+'            const formData = new FormData();' +
+'            formData.append("file", fileBlob, fileName);' +
+'            formData.append("userPrompt", document.getElementById("user_prompt").value);' +
+'            const analysisResponse = await fetch("/api/start-analysis", { method: "POST", body: formData });' +
+'            const responseText = await analysisResponse.text();' +
+'            if (!analysisResponse.ok) {' +
+'                let msg = "启动分析任务失败。";' +
+'                try { msg = JSON.parse(responseText).error || msg; } catch (err) { msg = responseText || msg; }' +
+'                throw new Error(msg);' +
+'            }' +
+'            const analysisData = JSON.parse(responseText);' +
+'            updateStatus("文件上传成功！分析任务已在后台运行...", "loading");' +
+'            pollForResult(analysisData.resultKey);' +
+'        }' +
 '        function pollForResult(resultKey) {' +
 '            const pollInterval = 10000;' +
 '            const maxAttempts = 180;' +
