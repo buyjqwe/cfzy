@@ -259,10 +259,11 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
 
       if (fileTypes['图像 (Image)'].includes(extension)) {
           const mimeType = getMimeType(extension);
+          // Fixed: Move the base64 assignment before the size check
+          const base64 = arrayBufferToBase64(fileData.buffer);
           if (base64.length > 4 * 1024 * 1024) {
               partSegments = [{ text: contentHeader + "[图像文件过大，无法分析。]" }];
           } else {
-              const base64 = arrayBufferToBase64(fileData.buffer);
               partSegments = [{ text: contentHeader }, { inlineData: { mimeType, data: base64 } }];
           }
       } else if (Object.values(fileTypes).flat().includes(extension)) {
@@ -539,4 +540,7 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+}
+
+
 
