@@ -1,9 +1,9 @@
-name: Deploy Worker
+name: Deploy Worker with Diagnostics
 
 on:
   push:
     branches:
-      - main # This workflow runs only on pushes to the main branch
+      - main
 
 jobs:
   deploy:
@@ -13,13 +13,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - name: Diagnostic - Attempt to List Secrets
+        id: diagnostic_step
+        run: npx wrangler secret list
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # This allows the workflow to continue even if this step fails, so we can see the log.
+        continue-on-error: true
+
       - name: Deploy Worker
+        # This step will only run if the diagnostic step above was successful.
+        if: steps.diagnostic_step.outcome == 'success'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # This 'secrets' block tells Wrangler which secrets to upload to the Worker's environment.
-          # This list format is the clearest and most reliable way to define them.
           secrets: [
             'GOOGLE_API_KEY',
             'MS_TENANT_ID',
