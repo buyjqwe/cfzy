@@ -1,14 +1,7 @@
 // --- Cloudflare Worker for Large Folder Analysis via Client-Side Zipping and OneDrive ---
-// Architecture:
-// 1. Client selects a folder.
-// 2. Client-side JavaScript uses JSZip to create a ZIP file in the browser's memory. This preserves folder structure.
-// 3. This single ZIP blob is then uploaded to the Worker.
-// 4. The Worker streams the file to OneDrive, bypassing the 100MB limit.
-// 5. A background task is triggered to read the ZIP from OneDrive, use 'unzipit' to process it, and call Gemini.
-// 6. The final report is saved back to OneDrive.
+// This version imports the unzipit library from a local file.
 
-// @ts-ignore
-import { unzip } from 'https://unpkg.com/unzipit@1.4.3/dist/unzipit.module.js';
+import { unzip } from './unzipit.module.js';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -90,7 +83,7 @@ async function handleStartAnalysis(request, env, ctx) {
     try {
         const formData = await request.formData();
         const userPrompt = formData.get('userPrompt');
-        const file = formData.get('file'); // This is now the client-zipped blob
+        const file = formData.get('file'); // This is the client-zipped blob
 
         if (!file || !userPrompt) {
             return new Response(JSON.stringify({ error: '请求无效，缺少文件或指令。' }), { status: 400, headers: corsHeaders });
