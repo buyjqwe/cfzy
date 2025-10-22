@@ -362,7 +362,6 @@ const html =
 '            try {' +
 '                let fileToUpload;' +
 '                let fileName;' +
-'                // Scenario 1: User selected a folder (multiple files or has relative path)' +
 '                if (files.length > 1 || (files[0] && files[0].webkitRelativePath)) {' +
 '                    updateStatus("正在浏览器中打包文件夹...", "loading");' +
 '                    const zip = new JSZip();' +
@@ -374,7 +373,6 @@ const html =
 '                    fileToUpload = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 1 } });' +
 '                    fileName = folderName + ".zip";' +
 '                } else if (files.length === 1) {' +
-'                    // Scenario 2: User uploaded a single file' +
 '                    const singleFile = files[0];' +
 '                    if (!singleFile.name.toLowerCase().endsWith(".zip")) {' +
 '                         updateStatus("错误：如果您只选择一个文件，它必须是 .zip 格式。", "error");' +
