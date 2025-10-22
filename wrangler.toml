@@ -2,10 +2,13 @@ name = "gemini-onedrive-analyzer"
 main = "worker.js"
 compatibility_date = "2023-10-30"
 
-# Added build configuration for multi-module support
+# This build configuration is ESSENTIAL for multi-module support.
+# It tells Wrangler to treat your project as a collection of modules
+# and upload them together.
 [build]
 command = "" # No build step is needed for plain JS
-upload = {
-  format = "modules",
-  main = "./worker.js" # Specify the entry point for the module bundle
-}
+
+[build.upload]
+format = "modules"
+main = "./worker.js" # Specify the entry point for the module bundle
+
