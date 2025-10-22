@@ -3,7 +3,7 @@ name: Deploy Worker
 on:
   push:
     branches:
-      - main # This workflow runs only on pushes to the main branch
+      - main
 
 jobs:
   deploy:
@@ -19,11 +19,12 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # This 'secrets' block tells Wrangler which secrets to upload to the Worker's environment.
+          # This list format is the clearest and most reliable way to define them.
           secrets: [
-            GOOGLE_API_KEY,
-            MS_TENANT_ID,
-            MS_CLIENT_ID,
-            MS_CLIENT_SECRET,
-            MS_USER_ID
+            'GOOGLE_API_KEY',
+            'MS_TENANT_ID',
+            'MS_CLIENT_ID',
+            'MS_CLIENT_SECRET',
+            'MS_USER_ID'
           ]
 
