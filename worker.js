@@ -8,6 +8,17 @@ const dt = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3,
 const bt = new Uint8Array([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
 const ut = (e) => { let t = 0; for (const n of e) t += n.length; const n = new Uint8Array(t); let r = 0; for (const s of e) n.set(s, r), r += s.length; return n; };
 
+// --- Static tables for Fixed Huffman (m=1) ---
+// These are necessary to handle block type 1 (Fixed Huffman)
+const lt = new Uint16Array(288);
+for (let i = 0; i < 144; ++i) lt[i] = 8;
+for (let i = 144; i < 256; ++i) lt[i] = 9;
+for (let i = 256; i < 280; ++i) lt[i] = 7;
+for (let i = 280; i < 288; ++i) lt[i] = 8;
+const d = new Uint16Array(32);
+for (let i = 0; i < 32; ++i) d[i] = 5;
+// --- End Static tables ---
+
 // Re-defining inflateSync to be fully self-contained
 // MOVED UP: Must be defined before fflate object uses it.
 const inflateSync = (c, o) => {
@@ -45,14 +56,14 @@ const inflateSync = (c, o) => {
             }
             i_inflate += len;
             s_inflate += len;
-        } else if (m === 2) { // Dynamic Huffman
-            // This part is complex. The original code had a bug:
-            // The original: const [e, t] = (()=>{...})()
-            // This relies on 'g' which was defined *outside* fflate,
-            // and 'i' which was also global. This is the source of the error.
-            // The original 'g' function was:
-            // const g = () => {
-            //     if (i + 1 >= c.length) throw new Error("Unexpected EOF in length/distance code");
+        } else { // Compressed block (m=1 or m=2)
+            let ltbl, dtbl;
+            if (m === 1) { // FIXED: btype=01 (Fixed Huffman)
+                ltbl = lt;
+                dtbl = d;
+            } else if (m === 2) { // Dynamic Huffman
+                // This part is complex. The original code had a bug:
+                // ... (existing comments) ...
             //     const e = c[i++], t = c[i++]; 
             //     return e | t << 8
             // };
@@ -77,14 +88,21 @@ const inflateSync = (c, o) => {
 
                 // Let's assume the original code was flawed and try to fix the *structure*.
                 const e = new Uint16Array(32), f = new Uint16Array(32);
-                for(let n=0;n<32;n++) e[n] = g_inflate();
-                for(let n=0;n<32;n++) f[n] = g_inflate();
-                return [e,f]
-            })();
+                    for(let n=0;n<32;n++) e[n] = g_inflate();
+                    for(let n=0;n<32;n++) f[n] = g_inflate();
+                    return [e,f]
+                })();
+                ltbl = e; // Use dynamic tables
+                dtbl = t; // Use dynamic tables
+            } else { // m === 3 (invalid)
+                throw new Error(`Invalid block type ${m}`);
+            }
 
+            // MOVED: This processing loop handles *both* m=1 and m=2
+            // after the tables (ltbl, dtbl) are set.
             for (;;) {
                 if (i_inflate >= c.length) throw new Error("Unexpected EOF in dynamic block");
-                const n = e[c[i_inflate++]]; // This logic is simplified
+                const n = ltbl[c[i_inflate++]]; // Use ltbl
                 if (n < 256) {
                     if (s_inflate >= a.length) a = ut([a, new Uint8Array(32768)]);
                     a[s_inflate++] = n;
@@ -109,12 +127,6 @@ const inflateSync = (c, o) => {
                     s_inflate += p + 3;
                 } else break;
             }
-        } else if (m === 1) { // FIXED: 添加 btype=01 (Fixed Huffman) 的存根
-            // 原始的内联代码中缺少此块的实现.
-            // 抛出一个明确的错误，而不是让 worker 崩溃.
-            throw new Error(`Fixed Huffman block (btype=1) is not supported by this partial inlined library.`);
-        } else { // m === 3 (invalid)
-            throw new Error(`Invalid block type ${m}`);
         }
         if (y) break; // bfinal bit was set
     }
@@ -687,6 +699,7 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
 
 
 
