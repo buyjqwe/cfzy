@@ -1,44 +1,15 @@
-# .github/workflows/deploy.yml
-#
-# 这个 GitHub Actions 工作流会在您推送 (push) 到 'main' 分支时
-# 自动部署您的 Cloudflare Worker。
+# Worker 的名称
+name = "cfzy"
+# 主入口文件
+main = "src/index.mjs"
+# 兼容性日期
+compatibility_date = "2024-04-03"
 
-name: Deploy Cloudflare Worker
+# [vars]
+# 您可以在这里为开发环境设置非加密变量
+# 您的密钥 (Secrets) 必须使用 wrangler secret put 命令设置，而不是放在这里
 
-on:
-  push:
-    branches:
-      - main  # 您的默认分支可能是 'master'，请按需修改
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    name: Deploy Worker
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20' # 使用一个最新的 Node.js LTS 版本
-
-      - name: Install Wrangler
-        # 安装 wrangler CLI 工具
-        run: npm install wrangler
-
-      - name: Deploy
-        # 运行部署命令
-        # 它会从 GitHub Secrets 中读取所有密钥
-        run: npx wrangler deploy
-        env:
-          # CLOUDFLARE_API_TOKEN 是 GitHub Actions 用来验证 Cloudflare 账户的
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          
-          # 以下密钥将被 Wrangler 自动上传为 Worker 的 Secrets
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
-          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
-          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
-          MS_USER_ID: ${{ secrets.MS_USER_ID }}
-          MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
+[vars]
+# 示例：这些值将从您设置的 Secret 中读取
+# MS_TENANT_ID = "您的 TENANT_ID"
+# MS_USER_ID = "您的 USER_ID"
