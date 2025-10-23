@@ -311,7 +311,6 @@ async function handleGetResult(pathname, env) {
 
         if (!response.ok) {
              return new Response('分析结果尚未准备好，或不存在。', { status: 404 });
-  _message: 
         }
         
         return new Response(response.body, { headers: response.headers });
@@ -423,7 +422,6 @@ async function performAnalysis(driveItemId, resultKey, userPrompt, env) {
             'Content-Type': 'text/plain; charset=utf-8'
         },
         body: finalReport,
-  _message: 
   });
 
   } catch (e) {
@@ -590,7 +588,7 @@ const html =
 '                    }' +
 '                    fileToUpload = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 1 } });' +
 '                    fileName = folderName + ".zip";' +
-'          _message:      } else if (files.length === 1) {' +
+'                } else if (files.length === 1) {' +
 '                    const singleFile = files[0];' +
 '                    if (!singleFile.name.toLowerCase().endsWith(".zip")) {' +
 '                         updateStatus("错误：如果您只选择一个文件，它必须是 .zip 格式。", "error");' +
@@ -634,12 +632,12 @@ const html =
 '                    clearInterval(intervalId);' +
 '                    updateStatus("分析超时。", "error");' +
 '                    setLoadingState(false);' +
-'  Z_message:                return;' +
+'                    return;' +
 '                }' +
 '                try {' +
 '                    const resultResponse = await fetch("/" + resultKey);' +
 '                    if (resultResponse.status === 200) {' +
-'                G_message:           clearInterval(intervalId);' +
+'                        clearInterval(intervalId);' +
 '                        const reportText = await resultResponse.text();' +
 '                        updateStatus("分析完成！", "success");' +
 '                        displayResult(reportText, resultKey);' +
@@ -673,7 +671,7 @@ const html =
 '               statusBox = document.getElementById("status-box");' +
 '           }' +
 '            statusBox.innerHTML = \'<p class="\' + color + \' font-semibold text-lg flex items-center">\' + icon + \'<span class="ml-2">\' + message + \'</span></p>\';' +
-'V_message:        }' +
+'        }' +
 '        function displayResult(reportText, resultKey) {' +
 '            const sanitizedText = reportText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");' +
 '            const resultHtml = \'<div id="result-box"><a href="/\' + resultKey + \'" download class="float-right bg-gray-600 text-white py-1 px-3 rounded-md text-sm hover:bg-gray-700">下载报告</a><pre class="text-sm sm:text-base">\' + sanitizedText + \'</pre></div>\';' +
@@ -686,3 +684,4 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
