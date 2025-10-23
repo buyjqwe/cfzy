@@ -1,35 +1,44 @@
-name: Deploy Worker (Explicit Secrets)
+# .github/workflows/deploy.yml
+#
+# 这个 GitHub Actions 工作流会在您推送 (push) 到 'main' 分支时
+# 自动部署您的 Cloudflare Worker。
+
+name: Deploy Cloudflare Worker
 
 on:
   push:
     branches:
-      - main
+      - main  # 您的默认分支可能是 'master'，请按需修改
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    name: Deploy
+    name: Deploy Worker
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # 使用一个最新的 Node.js LTS 版本
 
       - name: Install Wrangler
-        run: npm install -g wrangler
+        # 安装 wrangler CLI 工具
+        run: npm install wrangler
 
-      - name: Upload Secrets Manually
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          echo "${{ secrets.GOOGLE_API_KEY }}" | wrangler secret put GOOGLE_API_KEY
-          echo "${{ secrets.MS_TENANT_ID }}" | wrangler secret put MS_TENANT_ID
-          echo "${{ secrets.MS_CLIENT_ID }}" | wrangler secret put MS_CLIENT_ID
-          echo "${{ secrets.MS_CLIENT_SECRET }}" | wrangler secret put MS_CLIENT_SECRET
-          echo "${{ secrets.MS_USER_ID }}" | wrangler secret put MS_USER_ID
-
-      - name: Deploy Worker Code
+      - name: Deploy
+        # 运行部署命令
+        # 它会从 GitHub Secrets 中读取所有密钥
         run: npx wrangler deploy
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
+          # CLOUDFLARE_API_TOKEN 是 GitHub Actions 用来验证 Cloudflare 账户的
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          
+          # 以下密钥将被 Wrangler 自动上传为 Worker 的 Secrets
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_USER_ID: ${{ secrets.MS_USER_ID }}
+          MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
