@@ -7,48 +7,9 @@ const st = new Uint8Array([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2
 const dt = new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
 const bt = new Uint8Array([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
 const ut = (e) => { let t = 0; for (const n of e) t += n.length; const n = new Uint8Array(t); let r = 0; for (const s of e) n.set(s, r), r += s.length; return n; };
-const fflate = {
-    unzipSync: (bytes) => {
-        const l = new Uint8Array(bytes);
-        const s = l.length;
-        let a = s - 22;
-        for (; ; --a) {
-            if (a < 0 || (l[a] === 0x50 && l[a + 1] === 0x4B && l[a + 2] === 0x05 && l[a + 3] === 0x06)) break;
-        }
-        if (a < 0) throw new Error("Invalid ZIP file: could not find end of central directory record");
-        
-        const f = l[a + 10] | l[a + 11] << 8;
-        let g = l[a + 16] | l[a + 17] << 8 | (l[a + 18] | l[a + 19] << 8) << 16;
-        const h = {};
-        let i = g;
-        for (let j = 0; j < f; ++j) {
-            const k = l[i + 10] | l[i + 11] << 8;
-            const m = l[i + 20] | l[i + 21] << 8 | (l[i + 22] | l[i + 23] << 8) << 16;
-            const n = l[i + 24] | l[i + 25] << 8 | (l[i + 26] | l[i + 27] << 8) << 16;
-            const o = l[i + 28] | l[i + 29] << 8;
-            const q = l[i + 30] | l[i + 31] << 8;
-            const t = l[i + 32] | l[i + 33] << 8;
-            const u = l[i + 42] | l[i + 43] << 8 | (l[i + 44] | l[i + 45] << 8) << 16;
-            const v = new TextDecoder().decode(l.subarray(i + 46, i + 46 + o));
-            const w = l.subarray(u + 30 + (l[u + 26] | l[u + 27] << 8) + (l[u + 28] | l[u + 29] << 8), u + 30 + (l[u + 26] | l[u + 27] << 8) + (l[u + 28] | l[u + 29] << 8) + m);
-            i += 46 + o + q + t;
-            if (!v.endsWith('/')) {
-                if (k === 0) h[v] = w.slice(0, n);
-                else if (k === 8) {
-                    const x = new Uint8Array(n);
-                    inflateSync(w, x);
-                    h[v] = x;
-                } else throw new Error(`Unknown compression type ${k}`);
-            }
-        }
-        return h;
-    }
-};
-// This is a global within the inflateSync scope, defined later.
-// To make this self-contained, we need to define it here or pass it.
-// For simplicity, let's redefine inflateSync to not rely on outer-scope globals.
 
 // Re-defining inflateSync to be fully self-contained
+// MOVED UP: Must be defined before fflate object uses it.
 const inflateSync = (c, o) => {
     const n = c.length;
     let i_inflate = 0; // Renamed to avoid conflict with 'i' in unzipSync scope
@@ -154,6 +115,44 @@ const inflateSync = (c, o) => {
         if (y) break; // bfinal bit was set
     }
     return a.subarray(0, s_inflate);
+};
+
+const fflate = {
+    unzipSync: (bytes) => {
+        const l = new Uint8Array(bytes);
+        const s = l.length;
+        let a = s - 22;
+        for (; ; --a) {
+            if (a < 0 || (l[a] === 0x50 && l[a + 1] === 0x4B && l[a + 2] === 0x05 && l[a + 3] === 0x06)) break;
+        }
+        if (a < 0) throw new Error("Invalid ZIP file: could not find end of central directory record");
+        
+        const f = l[a + 10] | l[a + 11] << 8;
+        let g = l[a + 16] | l[a + 17] << 8 | (l[a + 18] | l[a + 19] << 8) << 16;
+        const h = {};
+        let i = g;
+        for (let j = 0; j < f; ++j) {
+            const k = l[i + 10] | l[i + 11] << 8;
+            const m = l[i + 20] | l[i + 21] << 8 | (l[i + 22] | l[i + 23] << 8) << 16;
+            const n = l[i + 24] | l[i + 25] << 8 | (l[i + 26] | l[i + 27] << 8) << 16;
+            const o = l[i + 28] | l[i + 29] << 8;
+            const q = l[i + 30] | l[i + 31] << 8;
+            const t = l[i + 32] | l[i + 33] << 8;
+            const u = l[i + 42] | l[i + 43] << 8 | (l[i + 44] | l[i + 45] << 8) << 16;
+            const v = new TextDecoder().decode(l.subarray(i + 46, i + 46 + o));
+            const w = l.subarray(u + 30 + (l[u + 26] | l[u + 27] << 8) + (l[u + 28] | l[u + 29] << 8), u + 30 + (l[u + 26] | l[u + 27] << 8) + (l[u + 28] | l[u + 29] << 8) + m);
+            i += 46 + o + q + t;
+            if (!v.endsWith('/')) {
+                if (k === 0) h[v] = w.slice(0, n);
+                else if (k === 8) {
+                    const x = new Uint8Array(n);
+                    inflateSync(w, x); // This call is now valid
+                    h[v] = x;
+                } else throw new Error(`Unknown compression type ${k}`);
+            }
+        }
+        return h;
+    }
 };
 // --- END INLINED FFLATE LIBRARY ---
 
@@ -684,5 +683,6 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
 
 
