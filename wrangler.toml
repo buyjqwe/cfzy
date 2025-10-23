@@ -1,40 +1,38 @@
 # Cloudflare Worker 配置文件
-# 适用于 "homework-grader" 项目 (包含邮件认证和 KV 存储)
+# [!!] 已更新: 添加了 R2 存储桶绑定
 
 name = "cfzy"
 main = "src/index.mjs"
-compatibility_date = "2024-05-01" # 使用一个近期的兼容性日期
+compatibility_date = "2024-05-01"
+compatibility_flags = ["nodejs_compat"]
 
-# --------------------------------------------------------------------
-# 1. KV 命名空间绑定
-# --------------------------------------------------------------------
-# 'AUTH_KV' 是你在代码 (env.AUTH_KV) 中使用的名称。
-# 'id' 是一个占位符。
-# 我们的 deploy.yml 工作流将使用 --kv 标志 ( --kv AUTH_KV=$CF_KV_NAMESPACE_ID )
-# 在部署时将 GitHub Secret (CF_KV_NAMESPACE_ID) 动态链接到此绑定。
-#
-# 注意: deploy.yml 中的 --kv 标志需要一个 'id' 占位符才能工作。
-# 我们不能将 'id' 字段留空, 但它必须是32个十六进制字符。
-# "000..." 是一个安全的、无效的占位符。
+# [!! NEW !!] R2 存储桶绑定
+# 用于临时存储 >100MB 的大型文件上传
+[[r2_buckets]]
+binding = "R2_BUCKET" # 在 src/index.mjs 中使用 env.R2_BUCKET
+bucket_name = "CF_R2_BUCKET_NAME" # [!!!] 占位符, 由 deploy.yml 注入
 
-kv_namespaces = [
-  { binding = "AUTH_KV", id = "c1d99103272944f3b3adf480a06ae73e" } # 部署时将被 --kv 标志替换
-]
+# KV 命名空间绑定
+# 用于存储登录验证码和会话
+[[kv_namespaces]]
+binding = "AUTH_KV" # 在 src/index.mjs 中使用 env.AUTH_KV
+id = "CF_KV_NAMESPACE_ID" # [!!!] 占位符, 由 deploy.yml 注入
 
-# --------------------------------------------------------------------
-# 2. 环境变量 (Secrets)
-# --------------------------------------------------------------------
-# 我们的 deploy.yml 工作流配置为使用 'wrangler deploy --var ...' 来注入密钥。
-# Wrangler v3+ 允许这样做而无需在 toml 中预定义 [vars] 块。
-# 因此, 此处不需要 [vars] 块。
-# 
-# 在部署时, deploy.yml 中的命令将自动创建以下绑定:
-# - GOOGLE_API_KEY
-# - MS_CLIENT_ID
-# - MS_CLIENT_SECRET
-# - MS_TENANT_ID
-# - MS_USER_ID
-# - MS_ONEDRIVE_BASE_PATH
-# - APP_TITLE
-# - TEACHER_WHITELIST
+# 环境变量 (Secrets)
+# 这些值将由 deploy.yml 在部署时从 GitHub Secrets 注入
+# (注意: R2 密钥不在这里, 它们用于 S3 客户端)
+[vars]
+GOOGLE_API_KEY = "GOOGLE_API_KEY"
+MS_CLIENT_ID = "MS_CLIENT_ID"
+MS_CLIENT_SECRET = "MS_CLIENT_SECRET"
+MS_TENANT_ID = "MS_TENANT_ID"
+MS_USER_ID = "MS_USER_ID"
+MS_ONEDRIVE_BASE_PATH = "MS_ONEDRIVE_BASE_PATH"
+APP_TITLE = "APP_TITLE"
+TEACHER_WHITELIST = "TEACHER_WHITELIST"
+# [!! NEW !!] R2 相关的 secrets (在 worker 脚本内部使用)
+CF_R2_BUCKET_NAME = "CF_R2_BUCKET_NAME" 
+CF_R2_ACCESS_KEY_ID = "CF_R2_ACCESS_KEY_ID"
+CF_R2_SECRET_ACCESS_KEY = "CF_R2_SECRET_ACCESS_KEY"
+CLOUDFLARE_ACCOUNT_ID = "CLOUDFLARE_ACCOUNT_ID" # S3 Client 需要 Account ID
 

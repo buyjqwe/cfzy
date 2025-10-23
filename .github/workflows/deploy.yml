@@ -1,45 +1,72 @@
+# GitHub Actions 工作流: 部署 Cloudflare Worker
+# [!!] 已更新: 添加 R2 绑定和新密钥
+
 name: Deploy Cloudflare Worker
 
 on:
   push:
     branches:
-      - main # 仅在 main 分支被推送时触发
+      - main # 仅在推送到 main 分支时触发
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    name: Deploy
+    permissions:
+      contents: read # 允许 GitHub Actions 读取您的代码
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node.js 20
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          # cache: 'npm' # 禁用缓存以避免 'package-lock.json' 缺失的错误
+          node-version: 20 # 使用 Node.js 20.x
 
       - name: Install Dependencies
-        run: npm install # 此步骤将安装 package.json 中列出的所有依赖项
+        run: npm install # 安装 package.json 中的依赖 (unzipit, @google/generative-ai)
 
-      - name: Deploy
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # 在这里设置所有需要的 Secrets
-          # 注意：MS_REFRESH_TOKEN 已被移除
-          secrets: |
-            GOOGLE_API_KEY
-            MS_CLIENT_ID
-            MS_CLIENT_SECRET
-            MS_TENANT_ID
-            MS_USER_ID
+      - name: Deploy Worker
+        run: |
+          # 使用 npx wrangler deploy 命令
+          # - --var 传递环境变量 (来自 [vars])
+          # - --kv 绑定 KV 命名空间
+          # - --r2 绑定 R2 存储桶
+          npx wrangler deploy \
+            --var GOOGLE_API_KEY:$GOOGLE_API_KEY \
+            --var MS_CLIENT_ID:$MS_CLIENT_ID \
+            --var MS_CLIENT_SECRET:$MS_CLIENT_SECRET \
+            --var MS_TENANT_ID:$MS_TENANT_ID \
+            --var MS_USER_ID:$MS_USER_ID \
+            --var MS_ONEDRIVE_BASE_PATH:"$MS_ONEDRIVE_BASE_PATH" \
+            --var APP_TITLE:"$APP_TITLE" \
+            --var TEACHER_WHITELIST:"$TEACHER_WHITELIST" \
+            --kv AUTH_KV:$CF_KV_NAMESPACE_ID \
+            --r2 R2_BUCKET:$CF_R2_BUCKET_NAME \
+            --var CF_R2_BUCKET_NAME:$CF_R2_BUCKET_NAME \
+            --var CF_R2_ACCESS_KEY_ID:$CF_R2_ACCESS_KEY_ID \
+            --var CF_R2_SECRET_ACCESS_KEY:$CF_R2_SECRET_ACCESS_KEY \
+            --var CLOUDFLARE_ACCOUNT_ID:$CLOUDFLARE_ACCOUNT_ID
         env:
-          # 将 GitHub Secrets 映射到环境变量，以便 Wrangler 可以读取它们
+          # Cloudflare 部署凭据
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          
+          # KV 绑定密钥
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          
+          # [!! NEW !!] R2 绑定和 S3 客户端密钥
+          CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
+          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+
+          # 应用密钥 (来自 [vars])
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
           MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
           MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
           MS_USER_ID: ${{ secrets.MS_USER_ID }}
+          MS_ONEDRIVE_BASE_PATH: ${{ secrets.MS_ONEDRIVE_BASE_PATH }}
+          APP_TITLE: ${{ secrets.APP_TITLE }}
+          TEACHER_WHITELIST: ${{ secrets.TEACHER_WHITELIST }}
 

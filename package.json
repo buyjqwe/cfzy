@@ -1,16 +1,14 @@
 {
-  "name": "cloudflare-worker-homework-grader",
-  "version": "1.0.0",
-  "description": "Cloudflare Worker for grading homework using Gemini and OneDrive",
+  "name": "homework-grader-worker-v4",
+  "version": "4.0.0",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy"
+    "deploy": "npx wrangler deploy"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.1.3"
   },
   "devDependencies": {
     "wrangler": "^3.0.0"
-  },
-  "dependencies": {
-    "@google/generative-ai": "^0.15.0",
-    "unzipit": "^1.4.3"
   }
 }
