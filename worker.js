@@ -53,7 +53,7 @@ const inflateSync = (c, o) => {
     const n = c.length;
     let i_inflate = 0; // Renamed to avoid conflict with 'i' in unzipSync scope
     let s_inflate = 0; // Renamed to avoid conflict with 's' in unzipSync scope
-    const a = o || new Uint8Array(n * 3);
+    let a = o || new Uint8Array(n * 3);
 
     // Helper function 'g' needs to be local to inflateSync or passed
     // It seems to rely on 'c' and 'i_inflate'
@@ -684,4 +684,5 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
 
