@@ -18,6 +18,9 @@ format = "modules"
 # 也能保持一致的行为。建议使用一个近期的日期。
 compatibility_date = "2024-05-01"
 
+[[routes]]
+pattern = "z.yyjc.dpdns.org/*"
+
 [build]
 # 定义构建命令。由于我们使用了 npm 依赖，
 # Wrangler 需要知道如何打包它们。
