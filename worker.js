@@ -27,10 +27,10 @@ const inflateSync = (c, o) => {
     for (;;) {
         if (i_inflate >= n) throw new Error("Unexpected EOF in inflate");
         const h = c[i_inflate++];
-        const m = h & 7, y = h >> 3;
-        if (m === 1) { // Stored block
+        const y = h & 1, m = (h >> 1) & 3; // FIXED: bfinal (y) 和 btype (m) 解析正确
+        if (m === 0) { // FIXED: btype=00 (Stored block). 原来错误地写为 m === 1
             let len = g_inflate(); // Read length
-            if (i_inflate + 4 > c.length) throw new Error("Invalid stored block header");
+            if (i_inflate + 2 > c.length) throw new Error("Invalid stored block header"); // g_inflate 读了2字节, 只需再跳过 nlen 的2字节
             i_inflate += 2; // Skip nlen
             if (i_inflate + len > c.length) throw new Error("Invalid stored block length");
             
@@ -109,7 +109,11 @@ const inflateSync = (c, o) => {
                     s_inflate += p + 3;
                 } else break;
             }
-        } else if (m) { // m === 0 (stored) or m === 3 (invalid)
+        } else if (m === 1) { // FIXED: 添加 btype=01 (Fixed Huffman) 的存根
+            // 原始的内联代码中缺少此块的实现.
+            // 抛出一个明确的错误，而不是让 worker 崩溃.
+            throw new Error(`Fixed Huffman block (btype=1) is not supported by this partial inlined library.`);
+        } else { // m === 3 (invalid)
             throw new Error(`Invalid block type ${m}`);
         }
         if (y) break; // bfinal bit was set
@@ -683,6 +687,7 @@ const html =
 '    </script>' +
 '</body>' +
 '</html>';
+
 
 
 
