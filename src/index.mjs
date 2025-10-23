@@ -105,13 +105,18 @@ export default {
  * 4. 发送验证码邮件
  */
 async function handleLogin(request, env) {
+  const jsonHeaders = { 'Content-Type': 'application/json' };
   try {
     const { email } = await request.json();
     
     // [!!! 已更新 !!!] 
     // 支持邮箱全名或 @domain.com 格式的白名单
     if (!email || !email.includes('@')) {
-      return new Response('Valid email is required.', { status: 400 });
+      // [BUG FIX]: 总是返回 JSON
+      return new Response(JSON.stringify({ success: false, message: 'Valid email is required.' }), {
+        status: 400,
+        headers: jsonHeaders,
+      });
     }
 
     const lowerEmail = email.toLowerCase();
@@ -128,7 +133,11 @@ async function handleLogin(request, env) {
 
     if (!isAllowed) {
       console.log(`[Auth Fail] Email: ${email}. Domain: ${emailDomain}. Not in whitelist.`);
-      return new Response('Email address or domain is not authorized.', { status: 403 });
+      // [BUG FIX]: 总是返回 JSON
+      return new Response(JSON.stringify({ success: false, message: 'Email address or domain is not authorized.' }), {
+        status: 403,
+        headers: jsonHeaders,
+      });
     }
     // [!!! 更新结束 !!!]
 
@@ -147,17 +156,21 @@ async function handleLogin(request, env) {
     if (mailSent) {
       return new Response(JSON.stringify({ success: true, message: 'Verification code sent.' }), {
         status: 200,
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders,
       });
     } else {
       return new Response(JSON.stringify({ success: false, message: 'Failed to send email.' }), {
         status: 500,
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders,
       });
     }
   } catch (err) {
     console.error(`[Login Error] ${err}`);
-    return new Response('Internal server error.', { status: 500 });
+    // [BUG FIX]: 总是返回 JSON
+    return new Response(JSON.stringify({ success: false, message: 'Internal server error.' }), {
+      status: 500,
+      headers: jsonHeaders,
+    });
   }
 }
 
@@ -169,10 +182,15 @@ async function handleLogin(request, env) {
  * 4. 设置 HttpOnly Cookie
  */
 async function handleVerify(request, env) {
+  const jsonHeaders = { 'Content-Type': 'application/json' };
   try {
     const { email, code } = await request.json();
     if (!email || !code) {
-      return new Response('Email and code are required.', { status: 400 });
+      // [BUG FIX]: 总是返回 JSON
+      return new Response(JSON.stringify({ success: false, message: 'Email and code are required.' }), {
+        status: 400,
+        headers: jsonHeaders,
+      });
     }
 
     const kvKey = `code:${email}`;
@@ -201,12 +219,16 @@ async function handleVerify(request, env) {
     } else {
       return new Response(JSON.stringify({ success: false, message: 'Invalid or expired code.' }), {
         status: 401,
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders,
       });
     }
   } catch (err) {
     console.error(`[Verify Error] ${err}`);
-    return new Response('Internal server error.', { status: 500 });
+    // [BUG FIX]: 总是返回 JSON
+    return new Response(JSON.stringify({ success: false, message: 'Internal server error.' }), {
+      status: 500,
+      headers: jsonHeaders,
+    });
   }
 }
 
