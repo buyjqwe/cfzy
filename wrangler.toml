@@ -1,5 +1,40 @@
+# Cloudflare Worker 配置文件
+# 适用于 "homework-grader" 项目 (包含邮件认证和 KV 存储)
+
 name = "cfzy"
 main = "src/index.mjs"
-compatibility_date = "2024-05-01"
+compatibility_date = "2024-05-01" # 使用一个近期的兼容性日期
 
+# --------------------------------------------------------------------
+# 1. KV 命名空间绑定
+# --------------------------------------------------------------------
+# 'AUTH_KV' 是你在代码 (env.AUTH_KV) 中使用的名称。
+# 'id' 是一个占位符。
+# 我们的 deploy.yml 工作流将使用 --kv 标志 ( --kv AUTH_KV=$CF_KV_NAMESPACE_ID )
+# 在部署时将 GitHub Secret (CF_KV_NAMESPACE_ID) 动态链接到此绑定。
+#
+# 注意: deploy.yml 中的 --kv 标志需要一个 'id' 占位符才能工作。
+# 我们不能将 'id' 字段留空, 但它必须是32个十六进制字符。
+# "000..." 是一个安全的、无效的占位符。
+
+kv_namespaces = [
+  { binding = "AUTH_KV", id = "c1d99103272944f3b3adf480a06ae73e" } # 部署时将被 --kv 标志替换
+]
+
+# --------------------------------------------------------------------
+# 2. 环境变量 (Secrets)
+# --------------------------------------------------------------------
+# 我们的 deploy.yml 工作流配置为使用 'wrangler deploy --var ...' 来注入密钥。
+# Wrangler v3+ 允许这样做而无需在 toml 中预定义 [vars] 块。
+# 因此, 此处不需要 [vars] 块。
+# 
+# 在部署时, deploy.yml 中的命令将自动创建以下绑定:
+# - GOOGLE_API_KEY
+# - MS_CLIENT_ID
+# - MS_CLIENT_SECRET
+# - MS_TENANT_ID
+# - MS_USER_ID
+# - MS_ONEDRIVE_BASE_PATH
+# - APP_TITLE
+# - TEACHER_WHITELIST
 
