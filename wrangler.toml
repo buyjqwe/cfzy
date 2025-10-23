@@ -1,4 +1,37 @@
+# wrangler.toml
+# 这是 Cloudflare Worker 的主配置文件
+
+# 您的 Worker 名称。这将在您的 workers.dev 子域中使用。
+# (例如: 'homework-grader.your-account.workers.dev')
+# 请将其更改为您想要的唯一名称。
 name = "cfzy"
-main = "worker.js"
-compatibility_date = "2023-10-30"
+
+# 主入口点文件。
+# Wrangler 将在 'src' 目录中查找 'index.mjs' 文件。
+main = "src/index.mjs"
+
+# 指定 Worker 的格式为 ES 模块。
+# 这对于使用 'import' 和 'export' 语法至关重要。
+format = "modules"
+
+# 兼容性日期。这能确保您的 Worker 在 Cloudflare 更新时
+# 也能保持一致的行为。建议使用一个近期的日期。
+compatibility_date = "2024-05-01"
+
+[build]
+# 定义构建命令。由于我们使用了 npm 依赖，
+# Wrangler 需要知道如何打包它们。
+# (注意：通常 Wrangler 会自动检测到 package.json 并处理，
+# 但显式定义 node_compat 不是坏事)
+command = "npm install"
+
+[vars]
+# 重要的提醒：
+# 您的所有密钥 (Secrets) 都是通过 GitHub Actions 
+# 使用 'env' 字段在部署时安全上传的。
+#
+# 您 *不* 应该在此文件中硬编码任何密钥。
+# 这是一个占位符，以提醒您密钥是在 Cloudflare 
+# 仪表盘的 "Secrets" 部分管理的。
+# (GitHub Actions 会自动帮您设置它们)
 
