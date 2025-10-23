@@ -2,10 +2,4 @@ name = "cfzy"
 main = "src/index.mjs"
 compatibility_date = "2024-05-01"
 
-# 确保这部分存在，并且 pattern 是您的域名
-[[routes]]
-pattern = "z.yyjc.dpdns.org/*"
-
-# [vars] 部分是不必要的，MS_USER_ID 会由 deploy.yml 作为 secret 自动注入
-# 我们将在 index.mjs 中直接使用 MS_USER_ID
 
