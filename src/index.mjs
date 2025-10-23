@@ -1,613 +1,888 @@
 /**
- * Cloudflare Worker - 自动化作业批改
+ * Cloudflare Worker for Secure Homework Grading
  *
- * 功能:
- * 1. GET 请求: 返回一个 HTML 上传页面。
- * 2. POST 请求 (multipart/form-data):
- * - 立即响应 "上传成功"，防止浏览器超时。
- * - 在后台 (ctx.waitUntil) 执行所有耗时操作：
- * a. 获取 Microsoft Graph API 令牌 (客户端凭据流)。
- * b. 将作业 .zip 包上传到 OneDrive。
- * c. 解压主 .zip (unzipit)。
- * d. 遍历每个学生的 .zip (unzipit)。
- * e. 读取学生文件，构建 Gemini API 请求。
- * f. 调用 Gemini API 进行批改。
- * g. 将批改结果 (report.json) 上传回该学生的 OneDrive 文件夹。
- *
- * 环境变量 (Secrets) - 必须在 Cloudflare 仪表盘或 deploy.yml 中设置:
- * - GOOGLE_API_KEY: Gemini API 密钥。
- * - MS_CLIENT_ID: Microsoft Azure App Client ID。
- * - MS_CLIENT_SECRET: Microsoft Azure App Client Secret。
- * - MS_TENANT_ID: Microsoft Azure Tenant ID (租户ID)。
- * - MS_USER_ID: 目标 OneDrive 账户的 Microsoft Graph User ID (对象ID)。
+ * Features:
+ * 1. Email-based login with verification code (using MS Graph API for mail, KV for code storage).
+ * 2. Session management via secure, HttpOnly cookies.
+ * 3. Protected routes:
+ * - GET /: Shows login page or main app (upload/download).
+ * - POST /: Handles homework zip upload (protected).
+ * - GET /summary: Handles summary CSV download (protected).
+ * - POST /login: Creates and emails a verification code.
+ * - POST /verify: Verifies code and sets session cookie.
+ * - POST /logout: Clears session cookie.
+ * 4. Background processing (ctx.waitUntil) for:
+ * - Uploading main zip to OneDrive.
+ * - Unzipping, processing student files.
+ * - Calling Gemini API for grading.
+ * - Uploading individual JSON reports to OneDrive.
+ * 5. On-demand CSV summary generation by iterating OneDrive folders.
  */
 
 import { unzip } from 'unzipit'; // 用于解压 .zip 文件
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai'; // Gemini API
+import { GoogleGenerativeAI } from '@google/generative-ai'; // Gemini API
 
-// --- 全局常量 ---
-const ONEDRIVE_BASE_PATH = 'root:/Apps/HomeworkGrader'; // OneDrive 上的基础存储路径
+// --- 常量 ---
+const SESSION_COOKIE_NAME = '__auth_session';
+const SESSION_DURATION_SECONDS = 7 * 24 * 60 * 60; // 7 天
+const VERIFICATION_CODE_TTL_SECONDS = 300; // 5 分钟
 
-// Gemini API 安全设置 (设为最低，允许处理各种内容)
-const GEMINI_SAFETY_SETTINGS = [
-  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-];
-
+/**
+ * 主入口点: 处理所有传入的 HTTP 请求
+ */
 export default {
-  /**
-   * Worker 入口点
-   * @param {Request} request - 传入的请求
-   * @param {object} env - 环境变量 (Secrets)
-   * @param {object} ctx - 执行上下文 (用于 ctx.waitUntil)
-   * @returns {Promise<Response>}
-   */
   async fetch(request, env, ctx) {
-    // 检查所有必需的密钥是否存在
-    const requiredKeys = ['GOOGLE_API_KEY', 'MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'MS_TENANT_ID', 'MS_USER_ID'];
-    for (const key of requiredKeys) {
-      if (!env[key]) {
-        console.error(`[配置错误] 环境变量 ${key} 未设置。`);
-        return new Response(`服务器配置错误: ${key} 未设置。`, { status: 500 });
-      }
-    }
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    // 1. 解析会话 Cookie
+    const session = await parseSessionCookie(request, env);
 
     try {
-      if (request.method === 'GET') {
-        // GET 请求：返回 HTML 上传页面
-        return new Response(getHtmlPage(), {
-          status: 200,
+      // --- 公共路由 (无需登录) ---
+      if (method === 'POST' && path === '/login') {
+        return await handleLoginRequest(request, env);
+      }
+      if (method === 'POST' && path === '/verify') {
+        return await handleVerifyRequest(request, env);
+      }
+      if (method === 'POST' && path === '/logout') {
+        return handleLogoutRequest();
+      }
+
+      // --- 路由守卫: 检查是否登录 ---
+      if (!session.valid) {
+        // 如果未登录，无论是访问主页还是受保护的API，都显示登录页面
+        if (method === 'GET' && path === '/') {
+          return new Response(getHtmlPage('login', null, env.APP_TITLE || '作业批改系统'), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          });
+        }
+        // 对 API 请求返回 401
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      // --- 受保护的路由 (需要登录) ---
+      if (method === 'GET' && path === '/') {
+        // 已登录，显示主应用页面 (上传/下载)
+        return new Response(getHtmlPage('app', session.email, env.APP_TITLE || '作业批改系统'), {
           headers: { 'Content-Type': 'text/html; charset=utf-8' },
         });
-      } else if (request.method === 'POST') {
-        // POST 请求：处理文件上传
-        const formData = await request.formData();
-        const file = formData.get('homeworkZip'); // 'homeworkZip' 必须与 HTML 表单中的 name 匹配
-
-        if (!file || typeof file.name === 'undefined') {
-          return new Response('未找到名为 "homeworkZip" 的文件。', { status: 400 });
-        }
-
-        if (!file.name.endsWith('.zip')) {
-          return new Response('无效的文件类型。请上传 .zip 文件。', { status: 400 });
-        }
-
-        // 将文件内容读取为 ArrayBuffer
-        const fileBuffer = await file.arrayBuffer();
-        const homeworkZipName = file.name; // 例如 "Week5_Homework.zip"
-
-        // 关键：立即响应浏览器，防止超时
-        // 同时将真正的处理任务交给 ctx.waitUntil 在后台异步执行
-        ctx.waitUntil(
-          handleHomeworkProcessing(env, fileBuffer, homeworkZipName)
-            .catch(err => {
-              // 捕获后台任务的严重错误并记录
-              // 注意：这不会发送给用户，因为响应已经发出
-              console.error(`[后台处理失败] ${homeworkZipName}: ${err.message}`, err.stack);
-              // 可以在这里触发一个错误通知（例如发送到另一个 Worker 或 Webhook）
-            })
-        );
-
-        // 立即返回成功信息给用户
-        return new Response(
-          `文件 "${homeworkZipName}" 已收到，正在后台处理批改。这可能需要几分钟时间。`,
-          { status: 202 } // 202 Accepted (已接受，正在处理)
-        );
-
-      } else {
-        // 其他方法 (PUT, DELETE 等)
-        return new Response('无效的请求方法。请使用 GET 访问页面，或使用 POST 上传文件。', {
-          status: 405, // Method Not Allowed
-          headers: { 'Allow': 'GET, POST' },
-        });
       }
+
+      if (method === 'POST' && path === '/') {
+        // 处理作业上传
+        return await handleUpload(request, env, ctx);
+      }
+
+      if (method === 'GET' && path === '/summary') {
+        // 处理成绩汇总下载
+        const homeworkName = url.searchParams.get('homework');
+        if (!homeworkName) {
+          return new Response('缺少 "homework" 参数', { status: 400 });
+        }
+        return await handleSummaryDownload(env, homeworkName);
+      }
+
+      // 404 Not Found
+      return new Response('Not Found', { status: 404 });
     } catch (err) {
-      console.error(`[请求处理失败] ${err.message}`, err.stack);
+      console.error('Fetch Handler Error:', err.stack);
       return new Response(`服务器内部错误: ${err.message}`, { status: 500 });
     }
   },
 };
 
+// =================================================================
+// --- 认证与会话 (Auth & Session) ---
+// =================================================================
+
 /**
- * [后台任务] 异步处理作业的主逻辑
- * @param {object} env - 环境变量
- * @param {ArrayBuffer} fileBuffer - 主 .zip 文件的内容
- * @param {string} homeworkZipName - 主 .zip 文件的名称
+ * 1. 处理登录请求 (/login)
+ * 生成验证码, 存入 KV, 并发送邮件
  */
-async function handleHomeworkProcessing(env, fileBuffer, homeworkZipName) {
-  console.log(`[开始处理] ${homeworkZipName}`);
+async function handleLoginRequest(request, env) {
+  const formData = await request.formData();
+  const email = formData.get('email');
 
-  // 1. 获取 MS Graph API 令牌
-  const accessToken = await getMsGraphToken(env);
-  if (!accessToken) {
-    console.error(`[MS Token 失败] 无法获取 ${homeworkZipName} 的 MS Graph Token。`);
-    return; // 无法继续
+  if (!email || !email.includes('@')) { // 简单的邮箱验证
+    return new Response('请输入有效的邮箱地址', { status: 400 });
   }
-  console.log(`[MS Token 成功] ${homeworkZipName}`);
 
-  // 2. 将原始 .zip 包上传到 OneDrive (备份)
-  // 我们将 homeworkZipName 去掉 .zip 后缀，作为主文件夹名
-  const baseFolderName = homeworkZipName.replace(/\.zip$/i, '');
-  const backupPath = `${ONEDRIVE_BASE_PATH}/${baseFolderName}/${homeworkZipName}`;
+  // 检查是否在白名单中
+  const WHITELIST = (env.TEACHER_WHITELIST || '').split(',').map(e => e.trim()).filter(Boolean);
+  if (WHITELIST.length > 0 && !WHITELIST.includes(email)) {
+    console.warn(`[Login Attempt] Blocked non-whitelist email: ${email}`);
+    // 故意返回通用成功消息，防止探测白名单
+    return new Response('如果邮箱地址在白名单中，验证码已发送。', { status: 200 });
+  }
+  
+  const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6位验证码
+  const key = `authcode:${email}`;
 
-  await uploadFileToOneDrive(
-    env,
-    accessToken,
-    fileBuffer,
-    backupPath,
-    'application/zip'
-  );
-  console.log(`[OneDrive 上传成功] ${homeworkZipName} -> ${backupPath}`);
+  await env.AUTH_KV.put(key, code, { expirationTtl: VERIFICATION_CODE_TTL_SECONDS });
 
-  // 3. 在内存中解压主 .zip 包
-  const { entries } = await unzip(new Blob([fileBuffer]));
+  const emailSubject = `您的登录验证码: ${code}`;
+  const emailBody = `
+    <html>
+      <body>
+        <h3>欢迎使用 ${env.APP_TITLE || '作业批改系统'}</h3>
+        <p>您的登录验证码是： <h1>${code}</h1></p>
+        <p>此验证码将在 ${VERIFICATION_CODE_TTL_SECONDS / 60} 分钟内有效。</p>
+        <p>如果您未请求此验证码，请忽略此邮件。</p>
+      </body>
+    </html>
+  `;
 
-  // 4. 遍历主包中的每个学生 .zip 文件
-  for (const [studentZipName, studentZipEntry] of Object.entries(entries)) {
-    // 确保我们只处理 .zip 文件，并忽略 macOS 的 __MACOSX 文件夹
-    if (!studentZipName.endsWith('.zip') || studentZipName.startsWith('__MACOSX/')) {
-      console.log(`[跳过] ${studentZipName} (非学生 zip)`);
-      continue;
-    }
+  const token = await getMsGraphToken(env);
+  if (!token) {
+    return new Response('无法获取认证令牌以发送邮件', { status: 500 });
+  }
 
-    const studentFolderName = studentZipName.replace(/\.zip$/i, '');
-    console.log(`[处理学生] ${studentFolderName}`);
+  const sent = await sendEmail(env, token, email, emailSubject, emailBody);
+  if (!sent) {
+    return new Response('发送邮件失败', { status: 500 });
+  }
 
-    try {
-      // 5. 解压学生 .zip 包
-      const studentZipBlob = await studentZipEntry.blob();
-      const { entries: studentFiles } = await unzip(studentZipBlob);
-
-      // 6. 准备 Gemini API 的请求内容
-      // [ { part: (text | inlineData) }, ... ]
-      const geminiParts = [
-        { text: getGeminiPrompt(studentFolderName, homeworkZipName) }
-      ];
-
-      const studentFileContents = {}; // 用于构建最终报告
-
-      // 7. 遍历学生的所有文件
-      for (const [fileName, fileEntry] of Object.entries(studentFiles)) {
-        if (fileEntry.isDirectory || fileName.startsWith('__MACOSX/')) continue;
-
-        const fileBlob = await fileEntry.blob();
-        const fileBuffer = await fileBlob.arrayBuffer();
-        const mimeType = fileBlob.type || 'application/octet-stream';
-        const fileContentBase64 = arrayBufferToBase64(fileBuffer); // 转换为 Base64
-
-        // 存储文件内容（用于报告和 Gemini）
-        studentFileContents[fileName] = {
-          mimeType: mimeType,
-          size: fileBlob.size,
-        };
-
-        // 检查文件是否能被 Gemini API 接受
-        if (isMimeTypeSupportedByGemini(mimeType)) {
-          geminiParts.push({ text: `\n--- 学生文件: ${fileName} ---` });
-          geminiParts.push({
-            inlineData: {
-              mimeType: mimeType,
-              data: fileContentBase64,
-            },
-          });
-        } else {
-          // 如果 Gemini 不支持（例如 .docx, .pdf），我们只告诉它文件名
-          geminiParts.push({ text: `\n--- 学生文件: ${fileName} (类型 ${mimeType}, 无法直接读取) ---` });
-        }
-      }
-
-      // 8. 调用 Gemini API 批改
-      console.log(`[Gemini 请求] 正在批改 ${studentFolderName}`);
-      const geminiResultText = await callGeminiApi(env, geminiParts);
-      console.log(`[Gemini 响应] ${studentFolderName}: ${geminiResultText.substring(0, 50)}...`);
-
-      // 9. 创建最终报告 .json
-      const report = {
-        student: studentFolderName,
-        homework: baseFolderName,
-        processedAt: new Date().toISOString(),
-        geminiResult: parseGeminiJson(geminiResultText), // 解析 AI 返回的 JSON
-        filesSubmitted: studentFileContents,
-      };
-
-      // 10. 将批改报告上传回该学生的 OneDrive 文件夹
-      const reportPath = `${ONEDRIVE_BASE_PATH}/${baseFolderName}/${studentFolderName}/report.json`;
-      await uploadFileToOneDrive(
-        env,
-        accessToken,
-        JSON.stringify(report, null, 2), // 格式化 JSON
-        reportPath,
-        'application/json'
-      );
-      console.log(`[报告上传成功] ${reportPath}`);
-
-    } catch (studentErr) {
-      console.error(`[处理学生失败] ${studentZipName}: ${studentErr.message}`, studentErr.stack);
-      // 可以在此处上传一个 "error_report.json" 到该学生的文件夹
-    }
-  } // 结束学生循环
-
-  console.log(`[处理完成] ${homeworkZipName}`);
+  return new Response('验证码已发送至您的邮箱，请查收。', { status: 200 });
 }
 
+/**
+ * 2. 处理验证码验证请求 (/verify)
+ * 验证 KV 中的代码, 成功则设置会话 Cookie
+ */
+async function handleVerifyRequest(request, env) {
+  const formData = await request.formData();
+  const email = formData.get('email');
+  const code = formData.get('code');
 
-// --- 辅助函数 ---
+  if (!email || !code) {
+    return new Response('邮箱或验证码不能为空', { status: 400 });
+  }
+
+  const key = `authcode:${email}`;
+  const storedCode = await env.AUTH_KV.get(key);
+
+  if (!storedCode) {
+    return new Response('验证码已过期或不存在', { status: 400 });
+  }
+
+  if (storedCode !== code) {
+    return new Response('验证码错误', { status: 400 });
+  }
+
+  // 验证成功, 删除验证码
+  await env.AUTH_KV.delete(key);
+
+  // 创建会话
+  const sessionId = crypto.randomUUID();
+  const sessionKey = `session:${sessionId}`;
+  const sessionData = JSON.stringify({ email: email, createdAt: Date.now() });
+
+  await env.AUTH_KV.put(sessionKey, sessionData, { expirationTtl: SESSION_DURATION_SECONDS });
+
+  // 设置 HttpOnly, Secure Cookie
+  const cookie = `${SESSION_COOKIE_NAME}=${sessionId}; HttpOnly; Secure; Path=/; Max-Age=${SESSION_DURATION_SECONDS}; SameSite=Strict`;
+
+  // 重定向到主页
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Set-Cookie': cookie,
+      'Location': '/',
+    },
+  });
+}
 
 /**
- * [MS Graph] 使用客户端凭据流获取 Access Token
- * @param {object} env - 环境变量
- * @returns {Promise<string|null>} Access Token
+ * 3. 处理登出请求 (/logout)
+ * 清除会话 Cookie 和 KV 中的会话数据
+ */
+function handleLogoutRequest() {
+  // 发送一个立即过期的 Cookie 来清除它
+  const cookie = `${SESSION_COOKIE_NAME}=""; HttpOnly; Secure; Path=/; Max-Age=0; SameSite=Strict`;
+  // (注意: 我们没有删除 KV 中的会话, 它会自动过期。如果需要立即失效, 还需要从请求中解析 sessionId 并删除)
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Set-Cookie': cookie,
+      'Location': '/',
+    },
+  });
+}
+
+/**
+ * 4. 解析会话 Cookie
+ * 检查 Cookie 有效性并从 KV 返回会话数据
+ */
+async function parseSessionCookie(request, env) {
+  const cookieHeader = request.headers.get('Cookie');
+  if (!cookieHeader) {
+    return { valid: false };
+  }
+
+  const cookies = cookieHeader.split(';').map(c => c.trim());
+  const sessionCookie = cookies.find(c => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+
+  if (!sessionCookie) {
+    return { valid: false };
+  }
+
+  const sessionId = sessionCookie.split('=')[1];
+  if (!sessionId) {
+    return { valid: false };
+  }
+
+  const sessionKey = `session:${sessionId}`;
+  const sessionData = await env.AUTH_KV.get(sessionKey);
+
+  if (!sessionData) {
+    return { valid: false }; // 会话过期或无效
+  }
+
+  try {
+    const data = JSON.parse(sessionData);
+    return { valid: true, email: data.email, sessionId: sessionId };
+  } catch (e) {
+    return { valid: false };
+  }
+}
+
+// =================================================================
+// --- 核心应用逻辑 (App Logic) ---
+// =================================================================
+
+/**
+ * 5. 处理文件上传 (POST /)
+ * 立即返回响应, 并在后台启动处理
+ */
+async function handleUpload(request, env, ctx) {
+  const formData = await request.formData();
+  const homeworkFile = formData.get('homeworkFile');
+
+  // [BUG FIX] 检查文件是否存在
+  if (!homeworkFile || !homeworkFile.name || homeworkFile.name === 'undefined') {
+    return new Response('未选择任何文件。请选择一个 .zip 文件后重试。', { status: 400 });
+  }
+  
+  // 移除 .zip 后缀作为作业名称
+  const homeworkName = homeworkFile.name.replace(/\.zip$/i, '');
+  const fileBuffer = await homeworkFile.arrayBuffer();
+
+  // 关键: 立即返回 202 Accepted 响应, 防止浏览器超时
+  ctx.waitUntil(
+    processZipInBackground(env, fileBuffer, homeworkName)
+  );
+
+  return new Response(`文件 "${homeworkFile.name}" 已收到，正在后台处理批改。这可能需要几分钟时间。`, { status: 202 });
+}
+
+/**
+ * 6. 处理成绩汇总下载 (GET /summary)
+ * 按需生成并返回 CSV 文件
+ */
+async function handleSummaryDownload(env, homeworkName) {
+  console.log(`[Summary] 开始为 "${homeworkName}" 生成汇总...`);
+  const token = await getMsGraphToken(env);
+  if (!token) return new Response('无法获取 MS Token', { status: 500 });
+
+  const homeworkFolderPath = `${env.MS_ONEDRIVE_BASE_PATH}/${homeworkName}`;
+  const studentFolders = await listStudentFolders(env, token, homeworkFolderPath);
+
+  if (studentFolders.length === 0) {
+    return new Response(`未找到作业 "${homeworkName}" 的任何已处理学生数据。请确认名称是否正确, 以及AI是否已完成批改。`, { status: 404 });
+  }
+
+  const summaryData = [];
+  
+  // 并行抓取所有 report.json
+  const reportPromises = studentFolders.map(async (folder) => {
+    try {
+      const reportPath = `${homeworkFolderPath}/${folder.name}/report.json`;
+      const reportJson = await getOneDriveFileContent(env, token, reportPath);
+      
+      if (reportJson) {
+        return {
+          studentName: folder.name, // 文件夹名即学生名
+          grade: reportJson.overall_grade,
+          feedback: reportJson.overall_feedback,
+        };
+      } else {
+        return { studentName: folder.name, grade: "N/A", feedback: "report.json 未找到" };
+      }
+    } catch (e) {
+      console.error(`[Summary] 处理 ${folder.name} 失败:`, e.message);
+      return { studentName: folder.name, grade: "N/A", feedback: `处理失败: ${e.message}` };
+    }
+  });
+
+  const reports = await Promise.all(reportPromises);
+
+  // 添加尚未完成批改的学生 (如果需要)
+  // (当前逻辑: 仅显示已生成报告的学生)
+  
+  // 过滤掉批改未完成的 (如果文件夹存在但 report.json 不存在)
+  const finalReports = reports.filter(r => r.grade !== "N/A");
+  
+  if (finalReports.length === 0) {
+      return new Response(`作业 "${homeworkName}" 已找到, 但AI尚未完成任何批改。`, { status: 404 });
+  }
+
+  // 生成 CSV
+  const csvContent = generateCsv(finalReports);
+  const safeFileName = homeworkName.replace(/[^a-z0-9]/gi, '_');
+
+  return new Response(csvContent, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${safeFileName}_summary.csv"`,
+    },
+  });
+}
+
+// =================================================================
+// --- 后台处理 (Background Processing) ---
+// =================================================================
+
+/**
+ * 7. (后台) 主处理流程
+ */
+async function processZipInBackground(env, fileBuffer, homeworkName) {
+  console.log(`[后台处理] 开始: ${homeworkName}`);
+
+  try {
+    // 1. 获取 MS Token
+    const token = await getMsGraphToken(env);
+    if (!token) {
+      console.error('[后台处理] 失败: 无法获取 MS Token');
+      return;
+    }
+    console.log('[后台处理] MS Token 成功获取');
+
+    // 2. (可选) 上传原始 Zip 包作为备份
+    const zipPath = `${env.MS_ONEDRIVE_BASE_PATH}/${homeworkName}/${homeworkName}_archive.zip`;
+    await uploadToOneDrive(env, token, zipPath, fileBuffer, 'application/zip');
+    console.log(`[后台处理] 原始 ZIP 备份成功: ${zipPath}`);
+
+    // 3. 从 Zip 中解析学生文件
+    const students = await getStudentsFromZip(fileBuffer);
+    if (students.length === 0) {
+      console.warn('[后台处理] 警告: Zip 包中未找到学生文件。');
+      return;
+    }
+    console.log(`[后台处理] 解析到 ${students.length} 个学生`);
+
+    // 4. 循环处理每个学生 (并行)
+    const geminiApiKey = env.GOOGLE_API_KEY;
+    const model = new GoogleGenerativeAI(geminiApiKey).getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    const processingTasks = students.map(student => 
+      processSingleStudent(env, token, model, homeworkName, student)
+    );
+    
+    await Promise.allSettled(processingTasks);
+    
+    console.log(`[后台处理] 完成: ${homeworkName}`);
+
+  } catch (err) {
+    console.error(`[后台处理] 致命错误 (${homeworkName}):`, err.stack);
+  }
+}
+
+/**
+ * 8. (后台) 处理单个学生
+ */
+async function processSingleStudent(env, token, model, homeworkName, student) {
+  const studentName = student.name;
+  console.log(`[处理学生] 开始: ${studentName}`);
+
+  try {
+    // 1. 准备 Gemini 请求
+    const prompt = env.GEMINI_PROMPT || '请批改这份作业。';
+    const requestParts = [prompt, `学生: ${studentName}`];
+    
+    for (const file of student.files) {
+      requestParts.push(`--- 文件: ${file.name} ---`);
+      requestParts.push({
+        inlineData: {
+          data: btoa(String.fromCharCode.apply(null, file.data)),
+          mimeType: file.mimeType,
+        },
+      });
+    }
+
+    // 2. 调用 Gemini API
+    console.log(`[Gemini 请求] 正在批改: ${studentName}`);
+    const result = await model.generateContent({ contents: [{ role: 'user', parts: requestParts }] });
+    const responseText = result.response.text();
+    console.log(`[Gemini 响应] ${studentName} 批改完成`);
+
+    // 3. 解析 Gemini 响应 (假设为 JSON)
+    let reportJsonText = responseText;
+    if (responseText.startsWith('```json')) {
+      reportJsonText = responseText.substring(7, responseText.length - 3).trim();
+    }
+    
+    // 验证 JSON 格式
+    let reportData;
+    try {
+        reportData = JSON.parse(reportJsonText);
+    } catch (e) {
+        console.warn(`[Gemini 警告] ${studentName} 的响应不是有效JSON, 将作为纯文本保存。内容: ${responseText.substring(0, 50)}...`);
+        // 创建一个回退的 JSON
+        reportData = {
+            overall_grade: "N/A (AI未返回JSON)",
+            overall_feedback: responseText,
+            detailed_grades: []
+        };
+        reportJsonText = JSON.stringify(reportData, null, 2);
+    }
+
+    // 4. 上传批改报告到 OneDrive
+    const reportPath = `${env.MS_ONEDRIVE_BASE_PATH}/${homeworkName}/${studentName}/report.json`;
+    await uploadToOneDrive(env, token, reportPath, reportJsonText, 'application/json');
+    console.log(`[报告上传成功] ${reportPath}`);
+
+  } catch (err) {
+    console.error(`[处理学生] ${studentName} 失败:`, err.stack);
+    // (可选) 上传一个错误报告
+    const errorReport = { error: err.message, stack: err.stack };
+    const errorPath = `${env.MS_ONEDRIVE_BASE_PATH}/${homeworkName}/${studentName}/error.json`;
+    await uploadToOneDrive(env, token, errorPath, JSON.stringify(errorReport, null, 2), 'application/json');
+  }
+}
+
+// =================================================================
+// --- 辅助工具 (Utilities) ---
+// =================================================================
+
+/**
+ * 9. (工具) 从主 Zip 中解析学生文件
+ * 假设: 顶层 zip 包含每个学生的 zip (e.g., "张三.zip", "李四.zip")
+ */
+async function getStudentsFromZip(zipBuffer) {
+  const { entries } = await unzip(zipBuffer);
+  const students = [];
+  const studentZipEntries = Object.values(entries).filter(entry => entry.name.endsWith('.zip') && !entry.name.startsWith('__MACOSX'));
+
+  for (const entry of studentZipEntries) {
+    const studentName = entry.name.replace(/\.zip$/i, '').split('/').pop(); // "folder/张三.zip" -> "张三"
+    const studentZipBuffer = await entry.arrayBuffer();
+    const { entries: studentFiles } = await unzip(studentZipBuffer);
+    
+    const filesData = [];
+    for (const fileEntry of Object.values(studentFiles)) {
+      if (fileEntry.isDirectory || fileEntry.name.startsWith('__MACOSX') || fileEntry.name.endsWith('.DS_Store')) {
+        continue;
+      }
+      const fileData = await fileEntry.arrayBuffer();
+      filesData.push({
+        name: fileEntry.name,
+        data: new Uint8Array(fileData),
+        mimeType: fileEntry.contentType || 'application/octet-stream',
+      });
+    }
+
+    if (filesData.length > 0) {
+      students.push({ name: studentName, files: filesData });
+    }
+  }
+  return students;
+}
+
+/**
+ * 10. (工具) 生成 CSV 内容
+ */
+function generateCsv(data) {
+  if (data.length === 0) return '';
+  
+  const headers = ['StudentName', 'Grade', 'Feedback'];
+  const csvRows = [headers.join(',')]; // Header row
+
+  for (const row of data) {
+    const studentName = `"${(row.studentName || '').replace(/"/g, '""')}"`;
+    const grade = row.grade;
+    const feedback = `"${(row.feedback || '').replace(/"/g, '""').replace(/\n/g, ' ')}"`; // 替换换行符
+    csvRows.push([studentName, grade, feedback].join(','));
+  }
+  
+  // 添加 UTF-8 BOM 头, 确保 Excel 正确打开中文
+  return '\uFEFF' + csvRows.join('\n');
+}
+
+// =================================================================
+// --- Microsoft Graph API 助手 ---
+// =================================================================
+
+/**
+ * 11. (MS API) 获取 Access Token (Client Credentials Flow)
  */
 async function getMsGraphToken(env) {
   const url = `https://login.microsoftonline.com/${env.MS_TENANT_ID}/oauth2/v2.0/token`;
   const body = new URLSearchParams({
     client_id: env.MS_CLIENT_ID,
-    scope: 'https://graph.microsoft.com/.default',
     client_secret: env.MS_CLIENT_SECRET,
+    scope: '[https://graph.microsoft.com/.default](https://graph.microsoft.com/.default)',
     grant_type: 'client_credentials',
   });
 
+  const response = await fetch(url, {
+    method: 'POST',
+    body: body,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[MS Token 失败]', response.status, errorText);
+    return null;
+  }
+
+  const data = await response.json();
+  return data.access_token;
+}
+
+/**
+ * 12. (MS API) 发送邮件
+ * 需要 Mail.Send (Application) 权限
+ */
+async function sendEmail(env, token, toEmail, subject, htmlBody) {
+  // 注意: "saveToSentItems" 必须为 "false"
+  // 否则需要 Mail.ReadWrite (Application) 权限
+  const emailData = {
+    message: {
+      subject: subject,
+      body: {
+        contentType: 'HTML',
+        content: htmlBody,
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: toEmail,
+          },
+        },
+      ],
+    },
+    saveToSentItems: 'false',
+  };
+
+  const response = await fetch(`https://graph.microsoft.com/v1.0/users/${env.MS_USER_ID}/sendMail`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(emailData),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[Email 失败]', response.status, errorText);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 13. (MS API) 上传文件到 OneDrive
+ * (自动创建父文件夹, 覆盖同名文件)
+ */
+async function uploadToOneDrive(env, token, pathOnOneDrive, content, contentType) {
+  // Graph API 使用 /items/root:/path/to/file:/content
+  const url = `https://graph.microsoft.com/v1.0/users/${env.MS_USER_ID}/drive/root:${pathOnOneDrive}:/content`;
+  
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': contentType,
+    },
+    body: content,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[OneDrive 上传失败] ${pathOnOneDrive}:`, response.status, errorText);
+  }
+  return response.ok;
+}
+
+/**
+ * 14. (MS API) 列出文件夹中的子项 (用于 /summary)
+ */
+async function listStudentFolders(env, token, folderPath) {
+  const url = `https://graph.microsoft.com/v1.0/users/${env.MS_USER_ID}/drive/root:${folderPath}:/children?$select=name,folder`;
+  
   try {
     const response = await fetch(url, {
-      method: 'POST',
-      body: body,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers: { 'Authorization': `Bearer ${token}` },
     });
-
     if (!response.ok) {
-      const errorData = await response.json();
-      console.error('[MS Token Error]', response.status, errorData);
-      throw new Error(`MS Graph Token 请求失败: ${errorData.error_description || response.statusText}`);
+      if (response.status === 404) {
+        console.warn(`[listFolders] 404 - 文件夹未找到: ${folderPath}`);
+        return [];
+      }
+      throw new Error(`Graph API error ${response.status}: ${await response.text()}`);
     }
-
     const data = await response.json();
-    return data.access_token;
-  } catch (err) {
-    console.error(`[getMsGraphToken] ${err.message}`);
+    // 仅返回文件夹
+    return data.value.filter(item => item.folder);
+  } catch (e) {
+    console.error(`[listFolders] 失败: ${folderPath}`, e.message);
+    return [];
+  }
+}
+
+/**
+ * 15. (MS API) 获取 OneDrive 上的文件内容 (用于 /summary)
+ */
+async function getOneDriveFileContent(env, token, filePath) {
+  const url = `https://graph.microsoft.com/v1.0/users/${env.MS_USER_ID}/drive/root:${filePath}:/content`;
+  
+  try {
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      if (response.status === 404) return null; // 文件不存在
+      throw new Error(`Graph API error ${response.status}: ${await response.text()}`);
+    }
+    // 假设 report.json 总是 JSON
+    return await response.json(); 
+  } catch (e) {
+    console.error(`[getFile] 失败: ${filePath}`, e.message);
     return null;
   }
 }
 
-/**
- * [OneDrive] 上传文件到 Microsoft Graph
- * @param {object} env - 环境变量
- * @param {string} accessToken - MS Graph Access Token
- * @param {ArrayBuffer|string} fileContent - 文件内容
- * @param {string} pathOnOneDrive - 在 OneDrive 上的完整路径 (例如 'root:/Apps/Homework/file.zip')
- * @param {string} contentType - 文件的 MIME 类型
- * @returns {Promise<object>}
- */
-async function uploadFileToOneDrive(env, accessToken, fileContent, pathOnOneDrive, contentType) {
-  // 目标用户 ID
-  const targetUserID = env.MS_USER_ID;
 
-  // Graph API URL (使用 createUploadSession 适用于大文件，但简单 PUT 适用于 < 4MB)
-  // 为简单起见，我们假设文件 < 4MB；对于 > 4MB，需要使用 Upload Session。
-  // 路径必须以 ':/' 开头，并以 ':/content' 结尾
-  if (!pathOnOneDrive.startsWith('root:')) {
-    pathOnOneDrive = `root:${pathOnOneDrive}`;
-  }
-  const url = `https://graph.microsoft.com/v1.0/users/${targetUserID}/drive/${pathOnOneDrive}:/content`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'PUT',
-      body: fileContent,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': contentType,
-      },
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error(`[OneDrive Upload Error] ${pathOnOneDrive}`, response.status, errorData);
-      throw new Error(`OneDrive 上传失败 (${pathOnOneDrive}): ${errorData.error?.message || response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data; // 返回 OneDrive 文件元数据
-  } catch (err) {
-    console.error(`[uploadFileToOneDrive] ${err.message}`);
-    throw err; // 重新抛出错误，让上层捕获
-  }
-}
+// =================================================================
+// --- HTML 页面模板 ---
+// =================================================================
 
 /**
- * [Gemini] 调用 Google Gemini API
- * @param {object} env - 环境变量
- * @param {Array<object>} parts - 发送给 Gemini 的内容 (text 和 inlineData)
- * @returns {Promise<string>} Gemini 返回的文本
+ * 16. (工具) 生成动态 HTML 页面
  */
-async function callGeminiApi(env, parts) {
-  try {
-    const genAI = new GoogleGenerativeAI(env.GOOGLE_API_KEY);
-    // 使用 1.5 Flash（如果可用）或最新的模型
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest", safetySettings: GEMINI_SAFETY_SETTINGS });
-
-    const result = await model.generateContent({ contents: [{ role: "user", parts }] });
-
-    // 检查是否有响应
-    if (!result.response || !result.response.candidates || result.response.candidates.length === 0) {
-      console.error('[Gemini Error] API 未返回有效候选项', result.response);
-      throw new Error('Gemini API 未返回有效响应。');
-    }
-    
-    // 检查是否因安全或其他原因被阻止
-    const finishReason = result.response.candidates[0].finishReason;
-    if (finishReason !== "STOP" && finishReason !== "MAX_TOKENS") {
-       console.error(`[Gemini Error] 因 ${finishReason} 停止`, result.response.candidates[0]);
-       throw new Error(`Gemini 生成停止: ${finishReason}`);
-    }
-
-    // 检查 text() 是否存在
-    if (typeof result.response.text !== 'function') {
-        // 有时内容在 candidates[0].content.parts[0].text
-        if(result.response.candidates[0].content?.parts?.[0]?.text) {
-             return result.response.candidates[0].content.parts[0].text;
-        }
-        console.error('[Gemini Error] 响应格式错误，缺少 text() 方法', result.response);
-        throw new Error('Gemini 响应格式错误。');
-    }
-
-    return result.response.text();
-  } catch (err) {
-    console.error(`[callGeminiApi] ${err.message}`, err.stack);
-    // 返回一个错误的 JSON，以便上游可以处理
-    return JSON.stringify({ error: `调用 Gemini API 失败: ${err.message}` });
-  }
-}
-
-/**
- * [Gemini] 检查 MIME 类型是否受 Gemini (inlineData) 支持
- * @param {string} mimeType
- * @returns {boolean}
- */
-function isMimeTypeSupportedByGemini(mimeType) {
-  if (!mimeType) return false;
-  // 基于 Google Gemini API 文档
-  const supportedImage = ['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
-  const supportedVideo = ['video/mp4', 'video/mpeg', 'video/mov', 'video/avi', 'video/x-flv', 'video/mpg', 'video/webm', 'video/wmv', 'video/3gpp'];
-  const supportedAudio = ['audio/wav', 'audio/mp3', 'audio/aiff', 'audio/aac', 'audio/ogg', 'audio/flac'];
-  const supportedText = ['text/plain', 'text/html', 'text/css', 'text/javascript', 'application/json', 'text/xml', 'text/csv', 'text/markdown', 'text/rtf'];
+function getHtmlPage(pageType, email = null, appTitle = "作业批改系统") {
+  const title = `<h1>${appTitle}</h1>`;
   
-  // Gemini 1.5 Pro (和 Flash) *不* 支持 PDF, DOCX
-  // const supportedDocs = ['application/pdf']; 
+  const commonStyles = `
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 2rem; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; min-height: 90vh; }
+      main { background-color: #ffffff; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); padding: 2.5rem; max-width: 600px; width: 100%; box-sizing: border-box; }
+      h1, h2, h3 { color: #333; margin-top: 0; }
+      h1 { text-align: center; color: #1a1a1a; margin-bottom: 2rem; }
+      h2 { border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 2rem; }
+      form { display: flex; flex-direction: column; gap: 1rem; }
+      input[type="email"], input[type="text"], input[type="file"] { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+      button { background-color: #007aff; color: white; border: none; padding: 14px 20px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+      button:hover { background-color: #0056b3; }
+      button[type="submit"][name="logout"] { background-color: #f44336; margin-top: 1rem; }
+      button[type="submit"][name="logout"]:hover { background-color: #d32f2f; }
+      .user-info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; background: #eef; padding: 10px 15px; border-radius: 8px; font-size: 0.9rem; }
+      .message { padding: 1rem; border-radius: 8px; margin-top: 1rem; text-align: center; font-weight: 500; }
+      .message.success { background-color: #d4edda; color: #155724; }
+      .message.error { background-color: #f8d7da; color: #721c24; }
+      .message.loading { background-color: #fff3cd; color: #856404; }
+    </style>
+  `;
 
-  const allSupported = [
-      ...supportedImage, 
-      ...supportedVideo, 
-      ...supportedAudio, 
-      ...supportedText
-  ];
+  let bodyContent = '';
 
-  return allSupported.includes(mimeType.toLowerCase());
-}
-
-/**
- * [Gemini] 构建发送给 Gemini 的主要指令 (Prompt)
- * @param {string} studentName - 学生名
- * @param {string} homeworkName - 作业名
- * @returns {string} Prompt 文本
- */
-function getGeminiPrompt(studentName, homeworkName) {
-  return `
-# 角色
-你是一位严格但公平的大学教授，负责批改作业。
-
-# 任务
-你将收到来自学生 "${studentName}" 的关于作业 "${homeworkName}" 的文件。
-你的任务是：
-1.  仔细检查学生提交的所有文件（包括代码、图像、视频、音频和文本）。
-2.  根据文件内容和作业要求，给出一个**总分**（0-100）。
-3.  提供详细的、有建设性的**总体评语**。
-4.  (如果可能) 为每个主要文件或问题点提供**分项反馈**。
-
-# 重要指令
--   **严格的 JSON 输出**：你的回答**必须**是一个严格的 JSON 对象，不能包含任何 markdown 标记 (如 \`\`\`json) 或解释性文本。
--   **基于证据**：你的反馈必须基于学生提交的实际内容。
--   **专业性**：保持专业、学术的语气。
-
-# 输出格式 (必须严格遵守)
-{
-  "student": "${studentName}",
-  "homework": "${homeworkName}",
-  "overall_grade": 85,
-  "overall_feedback": "学生 ${studentName} 的作业完成度很高。代码逻辑清晰，但缺少对边界情况的处理。请在未来注意代码的稳健性。",
-  "detailed_feedback": [
-    {
-      "file": "main.py",
-      "feedback": "主要逻辑正确，但在第 42 行的循环处理存在性能问题。",
-      "grade": 90
-    },
-    {
-      "file": "design_document.txt",
-      "feedback": "设计文档思路清晰，图表（如果有）表达准确。",
-      "grade": 95
-    },
-    {
-      "file": "presentation.mp4",
-      "feedback": "视频演示（如果有）流畅，但音频质量有待提高。",
-      "grade": 80
-    }
-  ]
-}
-`;
-}
-
-/**
- * [Util] 解析 Gemini 可能返回的带 \`\`\`json 标记的字符串
- * @param {string} text - Gemini 返回的原始文本
- * @returns {object} 解析后的 JSON 对象
- */
-function parseGeminiJson(text) {
-  try {
-    // 移除 markdown 围栏
-    const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(cleanText);
-  } catch (err) {
-    console.warn('[JSON 解析失败] 无法解析 Gemini 响应，将返回原始文本。', text, err);
-    // 如果解析失败，返回一个包含原始文本的错误对象
-    return {
-      error: 'Gemini 返回了非 JSON 格式的响应',
-      raw_response: text,
-    };
-  }
-}
-
-/**
- * [Util] 将 ArrayBuffer 转换为 Base64 字符串
- * @param {ArrayBuffer} buffer
- * @returns {string}
- */
-function arrayBufferToBase64(buffer) {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/**
- * [HTML] 返回给 GET 请求的上传页面
- * @returns {string} HTML 页面内容
- */
-function getHtmlPage() {
-  // 我们将 Tailwind CSS 内联到 <style> 标签中，以避免外部 CDN 依赖
-  // (在实际生产中，你可能希望从 CDN 加载以利用缓存)
-  // 为了简单起见，这里使用 CDN
-  return `
-<!DOCTYPE html>
-<html lang="zh-CN" class="h-full bg-gray-50">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>作业上传</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    body { font-family: 'Inter', sans-serif; }
-    .spinner {
-      border-color: #f3f3f3;
-      border-top-color: #3498db;
-      border-radius: 50%;
-      width: 24px;
-      height: 24px;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-  </style>
-</head>
-<body class="flex items-center justify-center min-h-full p-4">
-  <div class="w-full max-w-lg bg-white p-8 rounded-xl shadow-lg">
-    <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">作业批改上传系统</h1>
-    
-    <!-- 上传表单 -->
-    <form id="uploadForm" enctype="multipart/form-data">
-      <div class="mb-6">
-        <label for="homeworkZip" class="block text-sm font-medium text-gray-700 mb-2">选择作业 .zip 包</label>
-        <input type="file" name="homeworkZip" id="homeworkZip" accept=".zip" required
-               class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
-        <p class="mt-1 text-xs text-gray-500">请上传包含所有学生 .zip 文件的**主 .zip 包**。</p>
+  if (pageType === 'login') {
+    bodyContent = `
+      ${title}
+      <div id="login-box">
+        <h2>教师登录</h2>
+        <form id="login-form">
+          <label for="email">教师邮箱:</label>
+          <input type="email" id="email" name="email" required placeholder="name@example.com">
+          <button type="submit">发送验证码</button>
+        </form>
       </div>
-
-      <button type="submit" id="submitButton" 
-              class="w-full flex items-center justify-center px-4 py-3 bg-blue-600 text-white text-base font-medium rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-          <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-        </svg>
-        上传并开始批改
-      </button>
-    </form>
-
-    <!-- 状态显示区域 -->
-    <div id="statusContainer" class="mt-6 text-center">
-      <!-- 加载指示器 (默认隐藏) -->
-      <div id="loadingIndicator" class="hidden flex-col items-center justify-center">
-        <div class="spinner"></div>
-        <p class="text-sm text-gray-600 mt-2">正在上传文件，请勿关闭页面...</p>
+      <div id="verify-box" style="display:none;">
+        <h2>验证码</h2>
+        <p>验证码已发送至 <strong id="email-display"></strong></p>
+        <form id="verify-form">
+          <input type="hidden" id="email-hidden" name="email">
+          <label for="code">6位验证码:</label>
+          <input type="text" id="code" name="code" required pattern="\\d{6}" maxlength="6">
+          <button type="submit">登录</button>
+        </form>
       </div>
-      <!-- 消息区域 -->
-      <div id="messageArea" class="text-sm p-4 rounded-lg hidden"></div>
-    </div>
-
-  </div>
-
-  <script>
-    const form = document.getElementById('uploadForm');
-    const submitButton = document.getElementById('submitButton');
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    const messageArea = document.getElementById('messageArea');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
+      <div id="message-container"></div>
+    `;
+  } else if (pageType === 'app') {
+    bodyContent = `
+      <div class="user-info">
+        <span>已登录: <strong>${email || '教师'}</strong></span>
+        <form action="/logout" method="POST" style="margin:0;">
+          <button type="submit" name="logout" style="padding: 8px 12px; font-size: 0.9rem;">退出登录</button>
+        </form>
+      </div>
+      ${title}
       
-      const fileInput = document.getElementById('homeworkZip');
-      if (!fileInput.files || fileInput.files.length === 0) {
-        showMessage('请先选择一个文件。', 'error');
-        return;
+      <!-- 1. 上传作业 -->
+      <section id="upload-section">
+        <h2>1. 上传作业压缩包</h2>
+        <form id="upload-form" enctype="multipart/form-data">
+          <label for="homeworkFile">选择作业 .zip 包:</label>
+          <p style="font-size:0.85rem; color:#555;">(压缩包内应包含每个学生的 .zip 文件)</p>
+          <input type="file" id="homeworkFile" name="homeworkFile" accept=".zip" required>
+          <button type="submit">上传并开始批改</button>
+        </form>
+      </section>
+
+      <!-- 2. 下载总表 -->
+      <section id="download-section">
+        <h2>2. 下载成绩总表</h2>
+        <form id="download-form">
+          <label for="homeworkName">输入作业名称:</label>
+          <p style="font-size:0.85rem; color:#555;">(必须与您上传的 .zip 文件名(不含.zip)完全一致)</p>
+          <input type="text" id="homeworkName" name="homeworkName" required placeholder="例如: 22计网1-GET+HEAD">
+          <button type="submit">下载 CSV 汇总表</button>
+        </form>
+      </section>
+
+      <div id="message-container"></div>
+    `;
+  }
+
+  const scripts = `
+    <script>
+      function showMessage(type, text) {
+        const container = document.getElementById('message-container');
+        if (!container) return;
+        container.innerHTML = \`<div class="message \${type}">\${text}</div>\`;
       }
 
-      // 禁用按钮并显示加载
-      submitButton.disabled = true;
-      submitButton.classList.add('bg-gray-400', 'cursor-not-allowed');
-      loadingIndicator.classList.remove('hidden');
-      loadingIndicator.classList.add('flex');
-      messageArea.classList.add('hidden');
-
-      const formData = new FormData(form);
-
-      try {
-        const response = await fetch(window.location.href, { // POST 到当前 URL
-          method: 'POST',
-          body: formData,
+      // --- 登录/验证逻辑 ---
+      const loginForm = document.getElementById('login-form');
+      const verifyForm = document.getElementById('verify-form');
+      if (loginForm && verifyForm) {
+        loginForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          showMessage('loading', '正在发送验证码...');
+          const formData = new FormData(loginForm);
+          const email = formData.get('email');
+          
+          const response = await fetch('/login', { method: 'POST', body: formData });
+          const text = await response.text();
+          
+          if (response.ok) {
+            showMessage('success', text);
+            document.getElementById('login-box').style.display = 'none';
+            document.getElementById('verify-box').style.display = 'block';
+            document.getElementById('email-display').textContent = email;
+            document.getElementById('email-hidden').value = email;
+          } else {
+            showMessage('error', text);
+          }
         });
 
-        const responseText = await response.text();
-
-        if (response.ok) {
-          // 状态 200-299 (特别是 202 Accepted)
-          showMessage(responseText, 'success');
-          form.reset(); // 清空表单
-        } else {
-          // 状态 400-599
-          showMessage(responseText, 'error');
-        }
-
-      } catch (error) {
-        console.error('上传失败:', error);
-        showMessage('上传失败，请检查网络连接或联系管理员。 ' + error.message, 'error');
-      } finally {
-        // 恢复按钮和隐藏加载
-        submitButton.disabled = false;
-        submitButton.classList.remove('bg-gray-400', 'cursor-not-allowed');
-        loadingIndicator.classList.add('hidden');
-        loadingIndicator.classList.remove('flex');
+        // 验证表单使用标准 POST 提交, 因为成功后会 302 重定向并设置 Cookie
+        // (不需要 JS 拦截)
       }
-    });
 
-    function showMessage(message, type) {
-      messageArea.textContent = message;
-      messageArea.classList.remove('hidden', 'bg-green-100', 'text-green-800', 'bg-red-100', 'text-red-800');
-      
-      if (type === 'success') {
-        messageArea.classList.add('bg-green-100', 'text-green-800');
-      } else if (type === 'error') {
-        messageArea.classList.add('bg-red-100', 'text-red-800');
+      // --- 上传逻辑 ---
+      const uploadForm = document.getElementById('upload-form');
+      if (uploadForm) {
+        uploadForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          showMessage('loading', '正在上传文件，请稍候...');
+          const formData = new FormData(uploadForm);
+          
+          try {
+            const response = await fetch('/', { method: 'POST', body: formData });
+            const text = await response.text();
+            
+            if (response.ok) { // 200-299 (包括 202)
+              showMessage('success', text);
+              uploadForm.reset();
+            } else {
+              showMessage('error', \`上传失败: \${text}\`);
+            }
+          } catch (err) {
+            showMessage('error', \`网络错误: \${err.message}\`);
+          }
+        });
       }
-      messageArea.classList.remove('hidden');
-    }
-  </script>
-</body>
-</html>
+
+      // --- 下载逻辑 ---
+      const downloadForm = document.getElementById('download-form');
+      if (downloadForm) {
+        downloadForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const homeworkName = document.getElementById('homeworkName').value;
+          if (!homeworkName) {
+            showMessage('error', '请输入作业名称');
+            return;
+          }
+          
+          showMessage('loading', \`正在生成 "\${homeworkName}" 的汇总表...\`);
+          
+          const url = \`/summary?homework=\${encodeURIComponent(homeworkName)}\`;
+          
+          try {
+            // 注意: 我们要处理的是文件下载, 而不是 JSON
+            const response = await fetch(url);
+            
+            if (response.ok) {
+              // 检查返回的是否是 CSV
+              const contentType = response.headers.get('Content-Type');
+              if (contentType && contentType.includes('text/csv')) {
+                // 成功, 触发下载
+                const blob = await response.blob();
+                const disposition = response.headers.get('Content-Disposition');
+                let filename = \`\${homeworkName}_summary.csv\`;
+                if (disposition && disposition.includes('filename=')) {
+                  filename = disposition.split('filename=')[1].replace(/"/g, '');
+                }
+                
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                showMessage('success', \`"\${filename}" 已开始下载。\`);
+              } else {
+                 // 可能是 JSON 错误
+                 const text = await response.text();
+                 showMessage('error', \`服务器返回非CSV内容: \${text}\`);
+              }
+            } else {
+              // 404 或 500 错误
+              const text = await response.text();
+              showMessage('error', \`无法下载: \${text}\`);
+            }
+          } catch (err) {
+            showMessage('error', \`网络错误: \${err.message}\`);
+          }
+        });
+      }
+    </script>
+  `;
+
+  return `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${appTitle}</title>
+      ${commonStyles}
+    </head>
+    <body>
+      <main>
+        ${bodyContent}
+      </main>
+      ${scripts}
+    </body>
+    </html>
   `;
 }
 
