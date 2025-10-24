@@ -1306,8 +1306,9 @@ function getHtmlPage(appTitle, userEmail, mode = 'login') {
               let filename = \`summary_\${homeworkName}.csv\`;
               if (disposition && disposition.indexOf('attachment') !== -1) {
                 // [!!] BUG FIX: 2025-10-24
-                // \2 必须转义为 \\2 才能在模板字符串中作为正则表达式的反向引用
-                const filenameRegex = /filename[^;=\n]*=((['"]).*?\\2|[^;\n]*)/;
+                // \2 是一个非法的八进制转义。
+                // 正确的 JS 正则表达式反向引用是 \2 (单个反斜杠)
+                const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
                 const matches = filenameRegex.exec(disposition);
                 if (matches != null && matches[1]) {
                   filename = matches[1].replace(/['"]/g, '');
