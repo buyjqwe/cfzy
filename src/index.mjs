@@ -135,11 +135,7 @@ async function handleLogin(request, env) {
     return jsonResponse({ error: 'Invalid email format' }, 400);
   }
 
-  // [!!] 2025-10-24: 按照用户要求，移除了白名单检查
-  // const authorized = await isAuthorized(email, env.TEACHER_WHITELIST);
-  // if (!authorized) {
-  //   return jsonResponse({ error: 'Email address or domain is not authorized' }, 403);
-  // }
+  // [!!] 按照用户要求，移除了白名单检查
 
   try {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -205,8 +201,9 @@ async function handleVerify(request, env, ctx) {
     'Set-Cookie',
     `${TOKEN_COOKIE}=${sessionToken}; HttpOnly; Secure; Path=/; Max-Age=${TOKEN_EXPIRATION_SECONDS}`
   );
-  headers.append('Location', '/');
-  return new Response(null, { status: 302, headers });
+  // [!!] BUG FIX: 修复 "Unexpected token 'E'"
+  // 不再发送 302，而是发送 JSON 响应，让前端 JS 处理跳转
+  return jsonResponse({ success: true, redirect: '/' });
 }
 
 /**
@@ -333,9 +330,10 @@ async function sendVerificationEmail(toEmail, code, env) {
  * (Graph API) 为大文件创建 OneDrive 上传会话
  * @param {string} accessToken
  * @param {string} pathOnOneDrive - e.g., "Apps/HomeworkGrader/homework.zip"
+ * @param {string} MS_USER_ID - 环境变量
  * @returns {object} { uploadUrl: "...", expirationDateTime: "..." }
  */
-async function createUploadSession(accessToken, pathOnOneDrive) {
+async function createUploadSession(accessToken, pathOnOneDrive, MS_USER_ID) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/root:/${pathOnOneDrive}:/createUploadSession`;
 
   const response = await fetch(graphUrl, {
@@ -363,9 +361,10 @@ async function createUploadSession(accessToken, pathOnOneDrive) {
  * @param {string} accessToken
  * @param {string} zipFileItemId - OneDrive 中 zip 文件的 Item ID
  * @param {string} destinationFolderItemId - 解压目标文件夹的 Item ID
+ * @param {string} MS_USER_ID - 环境变量
  * @returns {object} 异步操作的监控 URL
  */
-async function extractZipOnOneDrive(accessToken, zipFileItemId, destinationFolderItemId) {
+async function extractZipOnOneDrive(accessToken, zipFileItemId, destinationFolderItemId, MS_USER_ID) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/items/${zipFileItemId}/extract`;
 
   const response = await fetch(graphUrl, {
@@ -376,11 +375,11 @@ async function extractZipOnOneDrive(accessToken, zipFileItemId, destinationFolde
     },
     body: JSON.stringify({
       parentReference: {
-        id: destinationFolderItemId
-      }
+        id: destinationFolderItemId,
+      },
     }),
   });
-  
+
   // 202 Accepted 表示操作已开始
   if (response.status === 202) {
     // 返回用于轮询状态的 URL
@@ -399,11 +398,11 @@ async function extractZipOnOneDrive(accessToken, zipFileItemId, destinationFolde
 async function pollOperationStatus(accessToken, monitorUrl) {
   let status = 'inProgress';
   while (status === 'inProgress' || status === 'notStarted' || status === 'running') {
-    await new Promise(resolve => setTimeout(resolve, 3000)); // 等待 3 秒
+    await new Promise((resolve) => setTimeout(resolve, 3000)); // 等待 3 秒
 
     const response = await fetch(monitorUrl, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
 
     if (!response.ok) {
@@ -426,14 +425,17 @@ async function pollOperationStatus(accessToken, monitorUrl) {
  * (Graph API) 获取 OneDrive 项的 Item ID (通过路径)
  * @param {string} accessToken
  * @param {string} pathOnOneDrive - e.g., "Apps/HomeworkGrader/homework.zip"
+ * @param {string} MS_USER_ID - 环境变量
  * @returns {string} Item ID
  */
-async function getItemIdByPath(accessToken, pathOnOneDrive) {
-  const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/root:/${pathOnOneDrive}`;
-  
+async function getItemIdByPath(accessToken, pathOnOneDrive, MS_USER_ID) {
+  // 确保路径以 /drive/root:/ 开头，并且正确编码
+  const encodedPath = encodeURI(pathOnOneDrive).replace(/'/g, "''").replace(/%/g, '%25');
+  const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/root:/${encodedPath}`;
+
   const response = await fetch(graphUrl, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!response.ok) {
@@ -448,14 +450,15 @@ async function getItemIdByPath(accessToken, pathOnOneDrive) {
  * (Graph API) 获取文件夹中的所有子项 (文件/文件夹)
  * @param {string} accessToken
  * @param {string} folderItemId - 文件夹的 Item ID
+ * @param {string} MS_USER_ID - 环境变量
  * @returns {array} 子项列表
  */
-async function listChildrenInFolder(accessToken, folderItemId) {
+async function listChildrenInFolder(accessToken, folderItemId, MS_USER_ID) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/items/${folderItemId}/children`;
-  
+
   const response = await fetch(graphUrl, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!response.ok) {
@@ -470,14 +473,15 @@ async function listChildrenInFolder(accessToken, folderItemId) {
  * (Graph API) 下载小文件内容 (< 4MB)
  * @param {string} accessToken
  * @param {string} fileItemId - 文件的 Item ID
+ * @param {string} MS_USER_ID - 环境变量
  * @returns {Promise<ArrayBuffer>} 文件内容
  */
-async function downloadSmallFile(accessToken, fileItemId) {
+async function downloadSmallFile(accessToken, fileItemId, MS_USER_ID) {
   const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/items/${fileItemId}/content`;
-  
+
   const response = await fetch(graphUrl, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!response.ok) {
@@ -492,20 +496,22 @@ async function downloadSmallFile(accessToken, fileItemId) {
  * @param {string} accessToken
  * @param {string} pathOnOneDrive - e.g., "Apps/HomeworkGrader/hw1/studentA/report.json"
  * @param {string} content - 文件内容 (字符串)
+ * @param {string} MS_USER_ID - 环境变量
  */
-async function uploadSmallFile(accessToken, pathOnOneDrive, content) {
-  const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/root:/${pathOnOneDrive}:/content`;
-  
+async function uploadSmallFile(accessToken, pathOnOneDrive, content, MS_USER_ID) {
+  const encodedPath = encodeURI(pathOnOneDrive).replace(/'/g, "''").replace(/%/g, '%25');
+  const graphUrl = `https://graph.microsoft.com/v1.0/users/${MS_USER_ID}/drive/root:/${encodedPath}:/content`;
+
   const response = await fetch(graphUrl, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     },
-    body: content
+    body: content,
   });
 
-  if (!response.ok) {
+  if (!response.ok && response.status !== 201) {
     const error = await response.text();
     throw new Error(`Upload small file failed: ${error}`);
   }
@@ -533,7 +539,7 @@ async function handleCreateUploadSession(request, env, session) {
 
   try {
     const token = await getMSGraphToken(env);
-    const sessionData = await createUploadSession(token, pathOnOneDrive);
+    const sessionData = await createUploadSession(token, pathOnOneDrive, env.MS_USER_ID);
 
     // 将上传会话 URL 和作业元数据存入 KV，供后续分片和完成时使用
     // 使用会话 token 作为键，确保只有该用户能操作
@@ -604,10 +610,9 @@ async function handleUploadChunk(request, env, session) {
     }
 
     const data = await response.json();
-    
+
     // 返回 OneDrive 的响应 (通常包含 nextExpectedRanges)
     return jsonResponse(data, response.status);
-
   } catch (err) {
     console.error('Upload Chunk Error:', err);
     return jsonResponse({ error: `Failed to upload chunk: ${err.message}` }, 500);
@@ -645,19 +650,20 @@ async function handleBackgroundProcessing(request, env, session) {
 
   try {
     const token = await getMSGraphToken(env);
+    const MS_USER_ID = env.MS_USER_ID; // 方便后续函数调用
 
     // 1. 获取 ZIP 文件的 Item ID
     console.log(`[BG Process] Getting ZIP Item ID for: ${zipFilePath}`);
-    const zipFileId = await getItemIdByPath(token, zipFilePath);
+    const zipFileId = await getItemIdByPath(token, zipFilePath, MS_USER_ID);
 
     // 2. 获取目标文件夹 (homeworkPath) 的 Item ID
     // (Graph API 不能在解压时自动创建父目录，我们必须先获取父目录 ID)
     console.log(`[BG Process] Getting Base Folder ID for: ${homeworkPath}`);
-    const homeworkFolderId = await getItemIdByPath(token, homeworkPath);
+    const homeworkFolderId = await getItemIdByPath(token, homeworkPath, MS_USER_ID);
 
     // 3. 命令 OneDrive 远程解压
     console.log(`[BG Process] Sending Extract command...`);
-    const monitorUrl = await extractZipOnOneDrive(token, zipFileId, homeworkFolderId);
+    const monitorUrl = await extractZipOnOneDrive(token, zipFileId, homeworkFolderId, MS_USER_ID);
 
     // 4. 轮询解压状态
     console.log(`[BG Process] Polling extract status...`);
@@ -670,43 +676,43 @@ async function handleBackgroundProcessing(request, env, session) {
 
     // 6. 遍历解压后的学生文件夹
     // (解压后，文件结构应为: .../my-homework/学生A/file1.pdf, .../my-homework/学生B/file2.txt)
-    const studentFolders = await listChildrenInFolder(token, homeworkFolderId);
+    const studentFolders = await listChildrenInFolder(token, homeworkFolderId, MS_USER_ID);
 
     for (const studentFolder of studentFolders) {
       // 确保是文件夹
-      if (!studentFolder.folder) continue; 
-      
+      if (!studentFolder.folder) continue;
+
       const studentName = studentFolder.name;
       const studentFolderId = studentFolder.id;
       console.log(`[BG Process] Processing student: ${studentName}`);
 
       try {
-        const studentFiles = await listChildrenInFolder(token, studentFolderId);
+        const studentFiles = await listChildrenInFolder(token, studentFolderId, MS_USER_ID);
         const promptParts = [
           getGradingPrompt(),
           `# 学生: ${studentName}`,
-          '# 学生提交的文件内容如下:'
+          '# 学生提交的文件内容如下:',
         ];
 
         let fileCount = 0;
         for (const file of studentFiles) {
           if (!file.file) continue; // 忽略子文件夹
-          
+
+          // 避免批改自己的报告
+          if (file.name === 'report.json' || file.name === 'error_report.json') {
+            continue;
+          }
+
           console.log(`[BG Process]   Reading file: ${file.name}`);
           const fileId = file.id;
-          const fileContent = await downloadSmallFile(token, fileId);
+          const fileContent = await downloadSmallFile(token, fileId, MS_USER_ID);
 
-          // 假设 Gemini 1.5 Flash 支持直接传入 ArrayBuffer
-          // (注意: 实际 SDK 可能需要 MIME 类型)
-          // (为了简单起见，我们假设它们是文本或 PDF，Gemini 1.5 可自动识别)
-          // (更稳健的做法是检查 file.file.mimeType)
           promptParts.push(`--- FILE: ${file.name} ---`);
-          
+
           // 将 ArrayBuffer 转换为 Base64 字符串并指定 MIME 类型
-          // (Gemini API 更喜欢 base64)
           const base64Data = arrayBufferToBase64(fileContent);
           const mimeType = file.file.mimeType || 'application/octet-stream';
-          
+
           promptParts.push({
             inlineData: {
               data: base64Data,
@@ -723,48 +729,54 @@ async function handleBackgroundProcessing(request, env, session) {
 
         // 7. 调用 Gemini API
         console.log(`[BG Process]   Calling Gemini for ${studentName}...`);
-        const result = await model.generateContent({ contents: [{ role: "user", parts: promptParts }] });
+        const result = await model.generateContent({ contents: [{ role: 'user', parts: promptParts }] });
         const responseText = result.response.text();
-        
+
         // 8. 上传批改报告
         const reportPath = `${homeworkPath}/${studentName}/report.json`;
         console.log(`[BG Process]   Uploading report for ${studentName} to ${reportPath}`);
-        
+
         // 尝试解析 AI 的 JSON，如果失败，也上传原始文本
         let reportContent;
         try {
-          // 确保 AI 返回的是有效的 JSON
-          const jsonText = responseText.match(/```json\n([\s\S]*?)\n```/)[1];
+          // 确保 AI 返回的是有效的 JSON (更稳健的解析)
+          const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) throw new Error('No JSON object found in AI response');
+          
+          const jsonText = jsonMatch[0];
           JSON.parse(jsonText); // 验证
           reportContent = jsonText;
         } catch (e) {
-          console.error(`[BG Process] Gemini response for ${studentName} was not valid JSON. Saving raw text.`);
+          console.error(`[BG Process] Gemini response for ${studentName} was not valid JSON. Saving raw text. Error: ${e.message}`);
           reportContent = JSON.stringify({
-            error: "AI response was not valid JSON",
+            error: 'AI response was not valid JSON',
             raw_response: responseText,
             grade: 0,
-            feedback: "AI 批改失败，返回的不是有效 JSON。请联系管理员。"
+            feedback: 'AI 批改失败，返回的不是有效 JSON。请联系管理员。',
           });
         }
-        
-        await uploadSmallFile(token, reportPath, reportContent);
 
+        await uploadSmallFile(token, reportPath, reportContent, MS_USER_ID);
       } catch (studentErr) {
         console.error(`[BG Process] Failed to process student ${studentName}: ${studentErr.message}`);
         // 尝试上传一个错误报告
         try {
           const errorReportPath = `${homeworkPath}/${studentName}/error_report.json`;
-          await uploadSmallFile(token, errorReportPath, JSON.stringify({
-            error: `Failed to process this student: ${studentErr.message}`,
-            stack: studentErr.stack,
-          }));
+          await uploadSmallFile(
+            token,
+            errorReportPath,
+            JSON.stringify({
+              error: `Failed to process this student: ${studentErr.message}`,
+              stack: studentErr.stack,
+            }),
+            MS_USER_ID
+          );
         } catch (reportErr) {
           console.error(`[BG Process] Failed to upload error report for ${studentName}: ${reportErr.message}`);
         }
       }
     }
     console.log(`[BG Process Finish] Homework: ${homeworkName}`);
-
   } catch (err) {
     console.error(`[BG Process Fatal Error] ${err.message}`);
     // 可以在此处添加逻辑，例如上传一个总的错误文件到作业根目录
@@ -790,40 +802,41 @@ async function handleSummaryDownload(request, env, session) {
 
   try {
     const token = await getMSGraphToken(env);
-    
+    const MS_USER_ID = env.MS_USER_ID;
+
     // 1. 获取作业文件夹 ID
-    const homeworkFolderId = await getItemIdByPath(token, homeworkPath);
+    const homeworkFolderId = await getItemIdByPath(token, homeworkPath, MS_USER_ID);
 
     // 2. 遍历学生文件夹
-    const studentFolders = await listChildrenInFolder(token, homeworkFolderId);
+    const studentFolders = await listChildrenInFolder(token, homeworkFolderId, MS_USER_ID);
 
     for (const studentFolder of studentFolders) {
       if (!studentFolder.folder) continue;
       const studentName = studentFolder.name;
-      
+
       try {
         // 3. 查找 report.json
-        const studentFiles = await listChildrenInFolder(token, studentFolder.id);
-        const reportFile = studentFiles.find(f => f.name === 'report.json');
+        const studentFiles = await listChildrenInFolder(token, studentFolder.id, MS_USER_ID);
+        const reportFile = studentFiles.find((f) => f.name === 'report.json');
 
         if (reportFile) {
           // 4. 下载并解析 report.json
-          const reportContentBuffer = await downloadSmallFile(token, reportFile.id);
+          const reportContentBuffer = await downloadSmallFile(token, reportFile.id, MS_USER_ID);
           const reportJsonStr = new TextDecoder().decode(reportContentBuffer);
           const reportData = JSON.parse(reportJsonStr);
-          
+
           results.push({
             student: studentName,
             grade: reportData.grade || 'N/A',
             feedback: reportData.feedback || 'N/A',
-            error: reportData.error || ''
+            error: reportData.error || '',
           });
         } else {
           results.push({
             student: studentName,
             grade: '批改未完成',
             feedback: '',
-            error: 'report.json not found'
+            error: 'report.json not found',
           });
         }
       } catch (studentErr) {
@@ -831,7 +844,7 @@ async function handleSummaryDownload(request, env, session) {
           student: studentName,
           grade: '错误',
           feedback: '',
-          error: `Failed to parse report: ${studentErr.message}`
+          error: `Failed to parse report: ${studentErr.message}`,
         });
       }
     }
@@ -846,12 +859,15 @@ async function handleSummaryDownload(request, env, session) {
         'Content-Disposition': `attachment; filename="${filename}"`,
       },
     });
-
   } catch (err) {
     console.error('Summary Download Error:', err);
     return jsonResponse({ error: `Failed to generate summary: ${err.message}` }, 500);
   }
 }
+
+// =============================================
+// 辅助函数
+// =============================================
 
 /**
  * (辅助) 生成 AI 批改指令
@@ -884,12 +900,12 @@ function getGradingPrompt() {
  */
 function generateCsv(results) {
   const header = ['Student', 'Grade', 'Feedback', 'Error'];
-  const rows = results.map(r => 
+  const rows = results.map((r) =>
     [
       `"${r.student.replace(/"/g, '""')}"`,
       r.grade,
       `"${(r.feedback || '').replace(/"/g, '""').replace(/\n/g, ' ')}"`, // 移除反馈中的换行符
-      `"${(r.error || '').replace(/"/g, '""')}"`
+      `"${(r.error || '').replace(/"/g, '""')}"`,
     ].join(',')
   );
   return [header.join(','), ...rows].join('\n');
@@ -1121,22 +1137,20 @@ function getHtmlPage(appTitle, userEmail, mode = 'login') {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: emailInput.value, code: document.getElementById('code').value })
               });
-              // 成功的响应是 302 重定向，fetch 不会抛错
-              // 我们需要检查 res.type。如果是 'opaqueredirect'，说明重定向被拦截，但后端成功了
-              // 如果是 ok，说明后端返回了 JSON 错误
-              if (res.ok) {
-                const data = await res.json();
+              
+              const data = await res.json();
+              if (!res.ok) {
                 throw new Error(data.error || '验证失败');
               }
-              // 如果是重定向 (status 302) 或不透明重定向 (type 'opaqueredirect')
-              if (res.status === 302 || res.type === 'opaqueredirect' || !res.redirected) {
-                 // 登录成功，浏览器会自动处理 302 重定向并设置 cookie
-                 // 我们只需要跳转到主页
+
+              // [!!] 修复: 检查 JSON 响应中的 redirect
+              if (data.success && data.redirect) {
                  showMessage('登录成功！正在跳转...', false);
-                 window.location.href = '/';
+                 window.location.href = data.redirect; // 手动跳转
               } else {
                  throw new Error('未知的登录响应');
               }
+
             } catch (err) {
               showMessage('错误: ' + err.message, true);
               verifyBtn.disabled = false;
@@ -1291,6 +1305,8 @@ function getHtmlPage(appTitle, userEmail, mode = 'login') {
               const disposition = res.headers.get('Content-Disposition');
               let filename = \`summary_\${homeworkName}.csv\`;
               if (disposition && disposition.indexOf('attachment') !== -1) {
+                // [!!] BUG FIX: 2025-10-24
+                // \2 必须转义为 \\2 才能在模板字符串中作为正则表达式的反向引用
                 const filenameRegex = /filename[^;=\n]*=((['"]).*?\\2|[^;\n]*)/;
                 const matches = filenameRegex.exec(disposition);
                 if (matches != null && matches[1]) {
