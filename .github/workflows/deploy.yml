@@ -1,5 +1,5 @@
 # GitHub Actions 工作流: 部署 Cloudflare Worker
-# [!!] 已更新: 添加 R2 绑定和新密钥
+# [!!] 已修复: 移除了 R2 依赖和所有无效的命令行参数
 
 name: Deploy Cloudflare Worker
 
@@ -12,7 +12,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read # 允许 GitHub Actions 读取您的代码
+      contents: read
       
     steps:
       - name: Checkout
@@ -21,45 +21,27 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20 # 使用 Node.js 20.x
+          node-version: 20 
 
       - name: Install Dependencies
-        run: npm install # 安装 package.json 中的依赖 (unzipit, @google/generative-ai)
+        run: npm install # 安装 package.json 中的依赖
 
       - name: Deploy Worker
-        run: |
-          # 使用 npx wrangler deploy 命令
-          # - --var 传递环境变量 (来自 [vars])
-          # - --kv 绑定 KV 命名空间
-          # - --r2 绑定 R2 存储桶
-          npx wrangler deploy \
-            --var GOOGLE_API_KEY:$GOOGLE_API_KEY \
-            --var MS_CLIENT_ID:$MS_CLIENT_ID \
-            --var MS_CLIENT_SECRET:$MS_CLIENT_SECRET \
-            --var MS_TENANT_ID:$MS_TENANT_ID \
-            --var MS_USER_ID:$MS_USER_ID \
-            --var MS_ONEDRIVE_BASE_PATH:"$MS_ONEDRIVE_BASE_PATH" \
-            --var APP_TITLE:"$APP_TITLE" \
-            --var TEACHER_WHITELIST:"$TEACHER_WHITELIST" \
-            --kv AUTH_KV:$CF_KV_NAMESPACE_ID \
-            --r2 R2_BUCKET:$CF_R2_BUCKET_NAME \
-            --var CF_R2_BUCKET_NAME:$CF_R2_BUCKET_NAME \
-            --var CF_R2_ACCESS_KEY_ID:$CF_R2_ACCESS_KEY_ID \
-            --var CF_R2_SECRET_ACCESS_KEY:$CF_R2_SECRET_ACCESS_KEY \
-            --var CLOUDFLARE_ACCOUNT_ID:$CLOUDFLARE_ACCOUNT_ID
+        # [!!] 修复:
+        # wrangler deploy 命令不需要 --var 或 --kv。
+        # 它会自动读取 wrangler.toml 文件, 
+        # 并从下面的 'env:' 块中查找所有需要的环境变量。
+        run: npx wrangler deploy
         env:
           # Cloudflare 部署凭据
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           
-          # KV 绑定密钥
+          # --- 以下变量必须与 wrangler.toml 匹配 ---
+          
+          # KV 绑定密钥 (来自 [[kv_namespaces]])
           CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
           
-          # [!! NEW !!] R2 绑定和 S3 客户端密钥
-          CF_R2_BUCKET_NAME: ${{ secrets.CF_R2_BUCKET_NAME }}
-          CF_R2_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
-          CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
-
           # 应用密钥 (来自 [vars])
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
