@@ -51,4 +51,3 @@ jobs:
           MS_ONEDRIVE_BASE_PATH: ${{ secrets.MS_ONEDRIVE_BASE_PATH }}
           APP_TITLE: ${{ secrets.APP_TITLE }}
           TEACHER_WHITELIST: ${{ secrets.TEACHER_WHITELIST }}
-
